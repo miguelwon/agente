@@ -8,7 +8,8 @@ from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 from litellm import acompletion
 from pydantic import BaseModel, Field
 
-from function_schema import Doc, get_function_schema
+from langchain_core.tools.base import create_schema_from_function
+from langchain_core.utils.function_calling import convert_to_openai_function
 
 from ..models.schemas import (
     Message, Response, StreamResponse, ConversationHistory,
@@ -24,6 +25,7 @@ class BaseAgent(BaseModel):
     """
 
     agent_name: str
+    system_prompt: Optional[str] = None
     is_conversational: bool = True
     parent_agent: Optional["BaseAgent"] = None
     child_agents: List["BaseAgent"] = []
@@ -70,6 +72,9 @@ class BaseAgent(BaseModel):
         if not self.parent_agent:
             self.agents_queue.appendleft(self)
 
+        if self.system_prompt:
+            self.add_message("system", content=self.system_prompt)
+
     def _discover_tools(self) -> Tuple[List[Callable], List[Dict[str, Any]]]:
         """
         Discover and register tools (methods) marked with the @tool decorator.
@@ -91,20 +96,19 @@ class BaseAgent(BaseModel):
                     continue
 
                 if callable(method) and getattr(method, "is_tool", False):
+                    ignored_params = getattr(method, "ignored_params", [])
                     tools.append(method)
-                    schema = get_function_schema(method)
+            
+                    schema = create_schema_from_function(
+                        method.__name__,
+                        method,
+                        filter_args=ignored_params,
+                        parse_docstring=True,
+                        error_on_invalid_docstring=False,
+                        include_injected=True,
+                    )
+                    schema = convert_to_openai_function(schema.schema())
 
-                    if (
-                        "parameters" in schema
-                        and "properties" in schema["parameters"]
-                    ):
-                        schema["parameters"]["properties"].pop("self", None)
-                        if "required" in schema["parameters"]:
-                            schema["parameters"]["required"] = [
-                                param
-                                for param in schema["parameters"]["required"]
-                                if param != "self"
-                            ]
                     schemas.append({"type": "function", "function": schema})
 
                     seen_names.add(name)
@@ -321,6 +325,7 @@ class BaseAgent(BaseModel):
                 self.task_complete = True
                 self.agents_queue.remove(self)
 
+            # at this point we have executed the function tools and enqueued the new agents
             async for stream_response in self.agents_queue[0].run(max_retries,n_call):
                 yield stream_response
 
@@ -341,10 +346,11 @@ class BaseAgent(BaseModel):
                 agent_method = self.tools_agent[tool["function"]["name"]]
                 arguments = json.loads(tool["function"]["arguments"])
                 agent_instance = agent_method(self, **arguments)
-                agent_instance.agents_queue = self.agents_queue
-                agent_instance.tool_call_id = tool["id"]
-                agent_instance.tool_name = tool["function"]["name"]
-                agent_instance.parent_agent = self
+                agent_instance.agents_queue = self.agents_queue # inherit the queue
+                agent_instance.tool_call_id = tool["id"] # set the tool call id so that when the task is complete, the result is sent to the parent agent with the correct tool id
+                agent_instance.tool_name = tool["function"]["name"] # set the tool name so that when the task is complete, the result is sent to the parent agent with the correct tool name
+                agent_instance.parent_agent = self # set the parent agent
+
                 # Ensure stream is False for child agents when parent is not streaming
                 # if not self.completion_kwargs['stream']:
                 #     agent_instance.stream = False
@@ -444,12 +450,16 @@ class BaseTaskAgent(BaseAgent):
 
         return tools, schemas
 
+
+
     @function_tool
-    def complete_task(
-        self, result: str = Doc("The message to be returned to the user")
-    ) -> Dict:
+    def complete_task(self, result:str) -> Dict:
         """
         Abstract method that must be implemented by child classes.
         This method will be called when the task is complete.
+
+        Args:
+            result: The message to be returned to the parent agent that called the task.
         """
         pass
+

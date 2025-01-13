@@ -2,28 +2,63 @@ from functools import wraps
 import asyncio
 from typing import Callable, Union, Any
 
-def function_tool(func: Callable) -> Callable:
+# def function_tool(func: Callable) -> Callable:
+#     """
+#     Decorator to mark a method as a function tool.
+    
+#     Args:
+#         func: The function to be decorated
+        
+#     Returns:
+#         Decorated function with tool metadata
+#     """
+#     @wraps(func)
+#     async def wrapper(*args, **kwargs) -> Any:
+#         try:
+#             if asyncio.iscoroutinefunction(func):
+#                 return await func(*args, **kwargs)
+#             return func(*args, **kwargs)
+#         except Exception as e:
+#             raise ValueError(f"Error in function tool {func.__name__}: {str(e)}") from e
+
+#     wrapper.is_tool = True
+#     wrapper.is_agent = False
+#     return wrapper
+
+
+def function_tool(
+    func: Union[Callable, None] = None,
+    *,
+    ignore: list[str] = None
+) -> Callable:
     """
     Decorator to mark a method as a function tool.
     
     Args:
         func: The function to be decorated
+        ignore: List of parameter names to ignore
         
     Returns:
         Decorated function with tool metadata
     """
-    @wraps(func)
-    async def wrapper(*args, **kwargs) -> Any:
-        try:
-            if asyncio.iscoroutinefunction(func):
-                return await func(*args, **kwargs)
-            return func(*args, **kwargs)
-        except Exception as e:
-            raise ValueError(f"Error in function tool {func.__name__}: {str(e)}") from e
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        async def wrapper(*args, **kwargs) -> Any:
+            try:
+                if asyncio.iscoroutinefunction(func):
+                    return await func(*args, **kwargs)
+                return func(*args, **kwargs)
+            except Exception as e:
+                raise ValueError(f"Error in function tool {func.__name__}: {str(e)}") from e
 
-    wrapper.is_tool = True
-    wrapper.is_agent = False
-    return wrapper
+        wrapper.is_tool = True
+        wrapper.is_agent = False
+        wrapper.ignored_params = ignore or []
+        return wrapper
+
+    if func is None:
+        return decorator
+    return decorator(func)
 
 def agent_tool(func: Union[type, Callable]) -> Union[type, Callable]:
     """
