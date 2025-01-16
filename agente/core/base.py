@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from langchain_core.tools.base import create_schema_from_function
 from langchain_core.utils.function_calling import convert_to_openai_function
 
-from ..models.schemas import (
+from agente.schemas import (
     Message, Response, StreamResponse, ConversationHistory,
     ToolCall, FunctionCall,Usage
 )
@@ -28,23 +28,24 @@ class BaseAgent(BaseModel):
     system_prompt: Optional[str] = None
     is_conversational: bool = True
     parent_agent: Optional["BaseAgent"] = None
-    child_agents: List["BaseAgent"] = []
+    child_agents: List["BaseAgent"] = Field(default_factory=list)
     conv_history: ConversationHistory = Field(
         default_factory=lambda: ConversationHistory(messages=[])
     )
-    tools_mem: List[Dict[str, Any]] = []
-    logs_completions: List[Any] = []
+    tools_mem: List[Dict[str, Any]] = Field(default_factory=list)
+    log_calls: List[Any] = Field(default_factory=list)
+    logs_completions: List[Any] = Field(default_factory=list)
     task_complete: bool = False
 
-    responses: List[Response] = []
-    stream_responses: List[StreamResponse] = []
+    responses: List[Response] = Field(default_factory=list)
+    stream_responses: List[StreamResponse] = Field(default_factory=list)
     agents_queue: Optional[Deque["BaseAgent"]] = Field(None, exclude=True)
 
     # These will be populated during model_post_init
-    tools: List[Callable] = Field([], exclude=True)
-    tools_schema: List[Dict[str, Any]] = Field([], exclude=True)
-    tools_functions: Dict[str, Callable] = Field({}, exclude=True)
-    tools_agent: Dict[str, Callable] = Field({}, exclude=True)
+    tools: List[Callable] = Field(default_factory=list, exclude=True)
+    tools_schema: List[Dict[str, Any]] = Field(default_factory=list, exclude=True)
+    tools_functions: Dict[str, Callable] =Field(default_factory=dict, exclude=True)
+    tools_agent: Dict[str, Callable] = Field(default_factory=dict, exclude=True)
 
 
     completion_kwargs: Dict[str, Any] = Field(default_factory=dict)
@@ -147,6 +148,15 @@ class BaseAgent(BaseModel):
             if message.agent_name == agent.agent_name
         ]
 
+        #hack to modify the message to have cache (only the first two)
+        new_messages = []
+        for i,m in enumerate(messages):
+            if i < 2:
+                m["content"] = [{"type":"text","text":m["content"],"cache_control": {"type": "ephemeral"}}]
+            new_messages.append(m)
+        messages = new_messages
+
+
         completion_params = {
             **agent.completion_config,
             "messages": messages,
@@ -175,8 +185,7 @@ class BaseAgent(BaseModel):
         Run the agent asynchronously without streaming the response.
         """
 
-        
-
+        self.log_calls.append(completion_params)
         _response = await acompletion(**completion_params)
         self.logs_completions.append(_response)
 
@@ -252,9 +261,16 @@ class BaseAgent(BaseModel):
         role = "assistant"
         tool_calls_info = defaultdict(lambda: defaultdict(str))
         current_content = ""
+        usage = None
 
+        self.log_calls.append(completion_params)
         async for chunk in await acompletion(**completion_params):
+            
             self.logs_completions.append(chunk)
+            if hasattr(chunk,"usage"):
+                usage = Usage(completion_tokens=chunk.usage.completion_tokens,
+                              prompt_tokens=chunk.usage.prompt_tokens,
+                              total_tokens=chunk.usage.total_tokens)
 
             delta = chunk.choices[0].delta
             content = None
@@ -275,10 +291,6 @@ class BaseAgent(BaseModel):
             if chunk.choices[0].delta.role:
                 role = chunk.choices[0].delta.role
             
-            if hasattr(chunk,"usage"):
-                usage = Usage(completion_tokens=chunk.usage.completion_tokens,
-                              prompt_tokens=chunk.usage.prompt_tokens,
-                              total_tokens=chunk.usage.total_tokens)
 
             stream_response = StreamResponse(
                 call_id=chunk.id,
@@ -295,8 +307,13 @@ class BaseAgent(BaseModel):
             yield stream_response
 
 
+
         if current_content:
-            self._add_message(role="assistant", content=current_content)
+            if not usage:
+                self._add_message(role="assistant", content=current_content)
+            else:
+                self._add_message(role="assistant", content=current_content, usage=usage)
+            usage = None # because this usage already accounts for the tokens used for the tool calls
 
         tool_calls = [
             ToolCall(
@@ -316,7 +333,10 @@ class BaseAgent(BaseModel):
                 if tool.function.name == "complete_task":
                     complete_task = True
                 self.tools_mem.append(tool.model_dump())
-            self._add_message(role="assistant", tool_calls=self.tools_mem)
+            if not usage:
+                self._add_message(role="assistant", tool_calls=self.tools_mem)
+            else:
+                self._add_message(role="assistant", tool_calls=self.tools_mem, usage=usage)
 
             await self._execute_function_tools()
             self._enqueue_agent_tools()
@@ -373,6 +393,7 @@ class BaseAgent(BaseModel):
         """
         Add a message to the conversation history of the current agent.
         """
+            
         self.conv_history.messages.append(
             Message(role=role, agent_name=self.agent_name, content=content, **kwargs)
         )
@@ -462,4 +483,3 @@ class BaseTaskAgent(BaseAgent):
             result: The message to be returned to the parent agent that called the task.
         """
         pass
-
