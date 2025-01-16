@@ -26,6 +26,7 @@ class Message(BaseModel):
     tool_name: Optional[str] = None
     hidden: bool = False
     id: Optional[str] = None
+    usage: Optional[Usage] = None
 
     def to_oai_style(self) -> Dict[str, str]:
         """Returns a dictionary containing only 'role' and 'content'"""
@@ -60,5 +61,4 @@ class StreamResponse(BaseModel):
 
 class ConversationHistory(BaseModel):
     messages: List[Message] = Field(default_factory=list)
-
 
