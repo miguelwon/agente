@@ -11,13 +11,25 @@ from pydantic import BaseModel, Field
 from langchain_core.tools.base import create_schema_from_function
 from langchain_core.utils.function_calling import convert_to_openai_function
 
-from agente.schemas import (
+from agente.models.schemas import (
     Message, Response, StreamResponse, ConversationHistory,
     ToolCall, FunctionCall,Usage
 )
 from .decorators import function_tool
 
+from inspect import signature
+import secrets
+def gen_tool_id():
+    """Generate a unique tool ID of 24 characters (no special characters)."""
+    chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    return ''.join(secrets.choice(chars) for _ in range(24))
 
+
+class AgentState:
+    READY = "ready"
+    WAITING_FOR_TOOLS = "waiting_for_tools"
+    WAITING_FOR_USER = "waiting_for_user"
+    COMPLETE = "complete"
 
 class BaseAgent(BaseModel):
     """
@@ -35,7 +47,7 @@ class BaseAgent(BaseModel):
     tools_mem: List[Dict[str, Any]] = Field(default_factory=list)
     log_calls: List[Any] = Field(default_factory=list)
     logs_completions: List[Any] = Field(default_factory=list)
-    task_complete: bool = False
+    retry_count: int = Field(default=0)  # Add this field
 
     responses: List[Response] = Field(default_factory=list)
     stream_responses: List[StreamResponse] = Field(default_factory=list)
@@ -53,6 +65,17 @@ class BaseAgent(BaseModel):
     model_config = {
         "arbitrary_types_allowed": True
     }
+    
+
+    orig_tool_choice: Optional[str] = Field(default=None, description="Save the tool choice before the next_tool")
+
+    state: str = Field(default=AgentState.READY)
+
+    next_tool_map: Optional[Dict] = Field(default={}, description="Mapping of next tools to be called")
+    manual_call_map: Optional[Dict] = Field(default={}, description="Mapping of manual calls from to next tools")
+    orig_tool_choice: Optional[str] = Field(default=None, description="The original tool choice before the next_tool")
+
+    
 
     @property
     def completion_config(self) -> Dict[str, Any]:
@@ -74,7 +97,11 @@ class BaseAgent(BaseModel):
             self.agents_queue.appendleft(self)
 
         if self.system_prompt:
-            self.add_message("system", content=self.system_prompt)
+            self._add_message("system", content=self.system_prompt)
+
+        if "tool_choice" in self.completion_kwargs:
+            self.orig_tool_choice = self.completion_kwargs["tool_choice"]
+
 
     def _discover_tools(self) -> Tuple[List[Callable], List[Dict[str, Any]]]:
         """
@@ -83,6 +110,7 @@ class BaseAgent(BaseModel):
         tools = []
         schemas = []
         seen_names = set()
+        next_tool_order = 0
 
         for cls in reversed(self.__class__.__mro__):
             for name, method in vars(cls).items():
@@ -97,6 +125,7 @@ class BaseAgent(BaseModel):
                     continue
 
                 if callable(method) and getattr(method, "is_tool", False):
+
                     ignored_params = getattr(method, "ignored_params", [])
                     tools.append(method)
             
@@ -125,69 +154,92 @@ class BaseAgent(BaseModel):
 
         return tools, schemas
 
-    async def run(self,max_retries:int = 5,n_call:int = 1) -> Any:
+
+    async def run(self, max_retries:int = 20) -> Any:
         """
         Run the agent asynchronously, processing messages and executing tools.
         """
-        agent = self.agents_queue[0]
+        n_calls = 0
+        
+        while self.agents_queue[0].state == AgentState.READY and n_calls < max_retries:
+            n_calls += 1
+            current_agent = self.agents_queue[0] 
+                
+            # Handle tools in memory first
+            if current_agent.tools_mem:
+                current_agent._add_message(role="assistant", tool_calls=current_agent.tools_mem)
+                await current_agent._execute_function_tools()
+                current_agent._enqueue_agent_tools()
+                n_calls -= 1
+                continue
+                
+            # Prepare messages for completion
+            messages = [
+                message.model_dump(exclude_unset=True, exclude={"agent_name", "hidden", "id"})
+                for message in current_agent.conv_history.messages
+                if message.agent_name == current_agent.agent_name
+            ]
 
-        n_call += 1
-        if n_call > max_retries:
+            # Hack: handle message caching (only first two messages)
+            # messages = [
+            #     {**m, "content": [{"type":"text", "text":m["content"], "cache_control": {"type": "ephemeral"}}]} 
+            #     if i < 2 else m
+            #     for i, m in enumerate(messages)
+            # ]
+
+            # Check for next tool            
+            # #check if tool was called because of tool_choice
+            if self.next_tool_map:
+                next_tool = list(self.next_tool_map.values())[0]
+                print(f"Next tool:",next_tool)
+                self.completion_kwargs["tool_choice"] = {
+                    "type": "function",
+                    "function": {"name": next_tool}
+                }
+            else:
+                #restore the original tool choice
+                if self.orig_tool_choice is not None:
+                    self.completion_kwargs["tool_choice"] = self.orig_tool_choice
+                else:
+                    if "tool_choice" in self.completion_kwargs:
+                        del self.completion_kwargs["tool_choice"]
+
+
+            # Prepare completion parameters
+            completion_params = {
+                **current_agent.completion_config,
+                "messages": messages,
+            }
+            if current_agent.tools_schema:
+                completion_params["tools"] = current_agent.tools_schema
+
+
+            # Run completion with or without streaming
+            if completion_params["stream"]:
+                async for response in current_agent._run_stream(completion_params):
+                    yield response
+            else:
+                async for response in current_agent._run_no_stream(completion_params):
+                    yield response
+
+
+        if n_calls >= max_retries:
             warnings.warn(f"Max retries ({max_retries}) reached for agent {self.agent_name}")
-            self.add_message("assistant","Max retries reached")
-            return
+            self.add_message("assistant", "Max retries reached")
 
-
-
-        if agent.tools_mem:
-            raise ValueError("There are still tools in memory to be executed")
-
-        messages = [
-            message.model_dump(exclude_unset=True, exclude={"agent_name", "hidden", "id"})
-            for message in agent.conv_history.messages
-            if message.agent_name == agent.agent_name
-        ]
-
-        #hack to modify the message to have cache (only the first two)
-        new_messages = []
-        for i,m in enumerate(messages):
-            if i < 2:
-                m["content"] = [{"type":"text","text":m["content"],"cache_control": {"type": "ephemeral"}}]
-            new_messages.append(m)
-        messages = new_messages
-
-
-        completion_params = {
-            **agent.completion_config,
-            "messages": messages,
-        }
-
-        if agent.tools_schema:
-            completion_params.update({
-                "tools": agent.tools_schema,
-                "tool_choice": "auto"
-            })
-
-        if completion_params["stream"]:
-            async for item in agent._run_stream(completion_params,max_retries,n_call):
-                yield item
-        else:
-            async for item in agent._run_no_stream(completion_params, max_retries,n_call):
-                yield item
 
     async def _run_no_stream(
         self,
-        completion_params: Dict,
-        max_retries,
-        n_call
+        completion_params: Dict
     ):
         """
         Run the agent asynchronously without streaming the response.
         """
-
+        task_complete = False
         self.log_calls.append(completion_params)
         _response = await acompletion(**completion_params)
         self.logs_completions.append(_response)
+
 
         content = _response.choices[0].message.content
         tool_calls = []
@@ -209,6 +261,9 @@ class BaseAgent(BaseModel):
             usage = Usage(completion_tokens=_response.usage.completion_tokens,
                           prompt_tokens=_response.usage.prompt_tokens,
                           total_tokens=_response.usage.total_tokens)
+        else:
+            usage = None
+
 
         response = Response(
             call_id=_response.id,
@@ -222,13 +277,13 @@ class BaseAgent(BaseModel):
 
         yield response
 
+
         if content:
             self._add_message(role="assistant", content=content)
-        if tool_calls:
-            complete_task = False
+        if tool_calls:            
             for tool in tool_calls:
                 if tool.function.name == "complete_task":
-                    complete_task = True
+                    task_complete = True
                 self.tools_mem.append(tool.model_dump())
             self._add_message(role="assistant", tool_calls=self.tools_mem)
 
@@ -238,20 +293,17 @@ class BaseAgent(BaseModel):
             #then we enqueue the agent tools
             self._enqueue_agent_tools()
 
-
-            if complete_task:
-                self.task_complete = True
+            if task_complete:
+                self.state = AgentState.COMPLETE
                 self.agents_queue.remove(self)
+        
+        if not task_complete and not tool_calls:
+            self.state = AgentState.WAITING_FOR_USER
 
-            #now the same but for current agent (or call again after the tools were executed) 
-            async for response in self.run(max_retries,n_call):
-                yield response
 
     async def _run_stream(
         self,
-        completion_params: Dict,
-        max_retries,
-        n_call
+        completion_params: Dict
     ):
         """
         Run the agent asynchronously with streaming the response.
@@ -262,10 +314,11 @@ class BaseAgent(BaseModel):
         tool_calls_info = defaultdict(lambda: defaultdict(str))
         current_content = ""
         usage = None
+        task_complete = False
 
         self.log_calls.append(completion_params)
+
         async for chunk in await acompletion(**completion_params):
-            
             self.logs_completions.append(chunk)
             if hasattr(chunk,"usage"):
                 usage = Usage(completion_tokens=chunk.usage.completion_tokens,
@@ -291,6 +344,10 @@ class BaseAgent(BaseModel):
             if chunk.choices[0].delta.role:
                 role = chunk.choices[0].delta.role
             
+            if hasattr(chunk,"usage"):
+                usage = Usage(completion_tokens=chunk.usage.completion_tokens,
+                              prompt_tokens=chunk.usage.prompt_tokens,
+                              total_tokens=chunk.usage.total_tokens)
 
             stream_response = StreamResponse(
                 call_id=chunk.id,
@@ -313,7 +370,8 @@ class BaseAgent(BaseModel):
                 self._add_message(role="assistant", content=current_content)
             else:
                 self._add_message(role="assistant", content=current_content, usage=usage)
-            usage = None # because this usage already accounts for the tokens used for the tool calls
+            # usage = None # because at this point usage already accounts for the tokens used for the tool calls
+
 
         tool_calls = [
             ToolCall(
@@ -328,11 +386,12 @@ class BaseAgent(BaseModel):
         ]
 
         if tool_calls:
-            complete_task = False
+            task_complete = False
             for tool in tool_calls:
                 if tool.function.name == "complete_task":
-                    complete_task = True
+                    task_complete = True
                 self.tools_mem.append(tool.model_dump())
+
             if not usage:
                 self._add_message(role="assistant", tool_calls=self.tools_mem)
             else:
@@ -341,13 +400,13 @@ class BaseAgent(BaseModel):
             await self._execute_function_tools()
             self._enqueue_agent_tools()
 
-            if complete_task:
-                self.task_complete = True
+            if task_complete:
+                self.state = AgentState.COMPLETE
                 self.agents_queue.remove(self)
 
-            # at this point we have executed the function tools and enqueued the new agents
-            async for stream_response in self.agents_queue[0].run(max_retries,n_call):
-                yield stream_response
+
+        if not task_complete and not tool_calls:
+            self.state = AgentState.WAITING_FOR_USER
 
 
     async def _execute_function_tools(self):
@@ -359,25 +418,137 @@ class BaseAgent(BaseModel):
                 tasks.append(self.execute_func_tool(tool, func))
         await asyncio.gather(*tasks)
 
+
     def _enqueue_agent_tools(self):
-        """Enqueues agent tools for execution."""
+        """Enqueues agent tools for execution.""" 
         for tool in self.tools_mem:
             if tool["function"]["name"] in self.tools_agent:
+                # print(f"{self.agent_name} called agent tool:",tool["function"]["name"])
                 agent_method = self.tools_agent[tool["function"]["name"]]
-                arguments = json.loads(tool["function"]["arguments"])
+                try:
+                    arguments = json.loads(tool["function"]["arguments"])
+                except json.JSONDecodeError:
+                    print(f"Error decoding arguments for tool {tool['function']['name']}\n\n{tool['function']['arguments']}")
+                    # TODO: handle this error
+
                 agent_instance = agent_method(self, **arguments)
                 agent_instance.agents_queue = self.agents_queue # inherit the queue
                 agent_instance.tool_call_id = tool["id"] # set the tool call id so that when the task is complete, the result is sent to the parent agent with the correct tool id
                 agent_instance.tool_name = tool["function"]["name"] # set the tool name so that when the task is complete, the result is sent to the parent agent with the correct tool name
                 agent_instance.parent_agent = self # set the parent agent
 
-                # Ensure stream is False for child agents when parent is not streaming
-                # if not self.completion_kwargs['stream']:
-                #     agent_instance.stream = False
-                # agent_instance.completion_kwargs['stream'] = self.completion_kwargs['stream']
-
+   
                 self.child_agents.append(agent_instance)
                 self.agents_queue.appendleft(agent_instance)
+
+
+
+    async def execute_func_tool(self, tool: Dict[str, Any], func: Callable) -> None:
+        """
+        Asynchronously execute a single function tool and add the result to the conversation history.
+        """
+        this_tool_name = tool["function"]["name"]
+        print(f"Executing tool: {this_tool_name} from agent {self.agent_name}")
+
+        try:
+            arguments = json.loads(tool["function"]["arguments"])
+            if asyncio.iscoroutinefunction(func):
+                result = await func(self, **arguments)
+            else:
+                result = func(self, **arguments)
+
+        except TypeError as e:
+            result = f"Error executing tool {this_tool_name}: {str(e)}"
+        except Exception as e:
+            error_message = f"Unexpected error in tool execution: {str(e)}"
+            self._handle_tool_error(error_message, tool, e)
+            return
+
+        self._add_message(
+            role="tool",
+            content=json.dumps(result),
+            tool_call_id=tool["id"],
+            tool_name=this_tool_name,
+        )
+
+
+        if this_tool_name == "complete_task":
+            #If there means that the task is complete and the flow switches back to the parent agent
+
+            self.parent_agent._add_message(
+                role="tool",
+                content=json.dumps(result),
+                tool_call_id=self.tool_call_id,
+                tool_name=self.tool_name,
+            )
+
+            agent_method = self.parent_agent.tools_agent[self.tool_name]
+            next_tool = getattr(agent_method, "next_tool", None)
+            manual_call = getattr(agent_method, "manual_call", None)
+            if next_tool:
+                self._add_next_tool(self.parent_agent, self.tool_name,next_tool, manual_call,result)
+            if self.tool_name in self.parent_agent.next_tool_map:
+                self._add_manual_tool_call(self.parent_agent,self.tool_name,result)
+
+            self._cleanup_tool_map(self.parent_agent, self.tool_name)
+
+            #clean the tool from the parent agent
+            self.parent_agent.tools_mem = [
+                t for t in self.parent_agent.tools_mem if t["id"] != self.tool_call_id
+            ]
+
+        else:
+
+            #If here means that the tool was executed and the flow continues within the same agent (where is TaskAgent or BaseAgent)
+            tool_method = self.tools_functions[this_tool_name]
+            next_tool = getattr(tool_method, "next_tool", None)
+            manual_call = getattr(func, "manual_call", None)
+            if next_tool:
+                self._add_next_tool(self, this_tool_name,next_tool,manual_call,result)
+            if this_tool_name in self.next_tool_map:
+                self._add_manual_tool_call(self,this_tool_name,result)
+
+            self._cleanup_tool_map(self, this_tool_name)
+
+
+        self.tools_mem = [t for t in self.tools_mem if t["id"] != tool["id"]]
+
+    def _add_next_tool(self, agent, current_tool,next_tool, manual_call,result):
+        """Add the next tool to the next_tool_map and manual_call_map."""    
+        agent.next_tool_map[current_tool] = next_tool
+        if manual_call:
+            agent.manual_call_map[next_tool] = manual_call
+    
+    def _add_manual_tool_call(self,agent,current_tool,result):        
+        next_tool = agent.next_tool_map[current_tool]
+        if next_tool in agent.manual_call_map:
+            manual_call = agent.manual_call_map[next_tool]
+
+            manual_args = manual_call(result)
+            tools_dict = agent.tools_agent if next_tool in agent.tools_agent else agent.tools_functions
+            sig_params = set(signature(tools_dict[next_tool]).parameters.keys()) - {'self'}
+            
+            if sig_params == set(manual_args.keys()):
+                manual_args = json.dumps(manual_args)
+                manual_tool_call = {
+                    "id": f"man_{gen_tool_id()}",
+                    "function": {
+                        "name": next_tool,
+                        "arguments": manual_args
+                    },
+                    "type": "function"
+                }
+                agent.tools_mem.append(manual_tool_call)
+            else:
+                warnings.warn(f"Manual call: arguments for {next_tool} are not compatible with the function signature")
+
+    def _cleanup_tool_map(self, agent, tool_name):
+        """Helper method to clean up completed tools from the next_tool_map."""
+        if agent.next_tool_map:
+            tool_names = [v for v in agent.next_tool_map.values()]
+            if tool_name in tool_names:
+                agent.next_tool_map = {k:v for k,v in agent.next_tool_map.items() if v != tool_name}
+
 
     def add_message(self, role: str, content: Optional[str] = None, **kwargs) -> None:
         """
@@ -388,52 +559,15 @@ class BaseAgent(BaseModel):
                 role=role, agent_name=self.agents_queue[0].agent_name, content=content, **kwargs
             )
         )
+        self.agents_queue[0].state = AgentState.READY
 
     def _add_message(self, role: str, content: Optional[str] = None, **kwargs) -> None:
         """
-        Add a message to the conversation history of the current agent.
+        Add a message to the conversation history of the self agent.
         """
-            
         self.conv_history.messages.append(
             Message(role=role, agent_name=self.agent_name, content=content, **kwargs)
         )
-
-    async def execute_func_tool(self, tool: Dict[str, Any], func: Callable) -> None:
-        """
-        Asynchronously execute a single function tool and add the result to the conversation history.
-        """
-        try:
-            arguments = json.loads(tool["function"]["arguments"])
-            if asyncio.iscoroutinefunction(func):
-                result = await func(self, **arguments)
-            else:
-                result = func(self, **arguments)
-        except TypeError as e:
-            result = f"Error executing tool {tool['function']['name']}: {str(e)}"
-        except Exception as e:
-            error_message = f"Unexpected error in tool execution: {str(e)}"
-            self._handle_tool_error(error_message, tool, e)
-            return
-
-        self._add_message(
-            role="tool",
-            content=json.dumps(result),
-            tool_call_id=tool["id"],
-            tool_name=tool["function"]["name"],
-        )
-
-        if tool["function"]["name"] == "complete_task":
-            self.parent_agent._add_message(
-                role="tool",
-                content=json.dumps(result),
-                tool_call_id=self.tool_call_id,
-                tool_name=self.tool_name,
-            )
-            self.parent_agent.tools_mem = [
-                t for t in self.parent_agent.tools_mem if t["id"] != self.tool_call_id
-            ]
-
-        self.tools_mem = [t for t in self.tools_mem if t["id"] != tool["id"]]
 
     def _handle_tool_error(
         self, error_message: str, tool: Dict[str, Any], exception: Exception
@@ -454,6 +588,9 @@ class BaseAgent(BaseModel):
 class BaseTaskAgent(BaseAgent):
     tool_call_id: str = None
     tool_name: str = None
+    # next_tool: Optional[str] = Field(default=None, description="Next agent to be called")
+    # force_next: Optional[str] = Field(default=None, description="Force the next agent to be called")
+    # manual_call: Optional[Callable[[Any], Dict]] = Field(default=None, description="Function to process complete_task output for next agent call")
 
     def _discover_tools(self):
         """
