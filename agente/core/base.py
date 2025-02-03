@@ -19,10 +19,44 @@ from .decorators import function_tool
 
 from inspect import signature
 import secrets
+
+import ast
+try:
+    # For Python 3.9 and later
+    from ast import unparse as ast_unparse
+except ImportError:
+    # For earlier versions, install astunparse via pip and use it as a fallback
+    import astunparse
+    def ast_unparse(tree):
+        return astunparse.unparse(tree)
+
 def gen_tool_id():
     """Generate a unique tool ID of 24 characters (no special characters)."""
     chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     return ''.join(secrets.choice(chars) for _ in range(24))
+
+
+def ensure_self_in_function_code(function_code: str, function_name: str) -> str:
+    """
+    Parse the function_code string, locate the function definition with name `function_name`,
+    and ensure that its parameter list includes 'self'. If not, add 'self' as the first parameter.
+    Return the modified code as a string.
+    """
+    tree = ast.parse(function_code)
+    # Look for the function definition with the given name.
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == function_name:
+            # If no arguments or the first is not 'self', insert it.
+            if not node.args.args or node.args.args[0].arg != 'self':
+                self_arg = ast.arg(arg='self', annotation=None)
+                node.args.args.insert(0, self_arg)
+            break  # Assuming only one such function; otherwise, adjust as needed.
+
+    modified_code = ast_unparse(tree)
+
+
+    return modified_code
+
 
 
 class AgentState:
@@ -67,14 +101,13 @@ class BaseAgent(BaseModel):
     }
     
 
-    orig_tool_choice: Optional[str] = Field(default=None, description="Save the tool choice before the next_tool")
-
     state: str = Field(default=AgentState.READY)
 
     next_tool_map: Optional[Dict] = Field(default={}, description="Mapping of next tools to be called")
     manual_call_map: Optional[Dict] = Field(default={}, description="Mapping of manual calls from to next tools")
     orig_tool_choice: Optional[str] = Field(default=None, description="The original tool choice before the next_tool")
 
+    can_add_tools: bool = False
     
 
     @property
@@ -110,10 +143,12 @@ class BaseAgent(BaseModel):
         tools = []
         schemas = []
         seen_names = set()
-        next_tool_order = 0
 
         for cls in reversed(self.__class__.__mro__):
             for name, method in vars(cls).items():
+                if not self.can_add_tools and name == "add_tool":
+                    continue
+
                 if (
                     name == "complete_task"
                     and cls is BaseTaskAgent
@@ -127,6 +162,8 @@ class BaseAgent(BaseModel):
                 if callable(method) and getattr(method, "is_tool", False):
 
                     ignored_params = getattr(method, "ignored_params", [])
+                    if 'self' not in ignored_params:
+                        ignored_params.append('self')
                     tools.append(method)
             
                     schema = create_schema_from_function(
@@ -154,6 +191,42 @@ class BaseAgent(BaseModel):
 
         return tools, schemas
 
+
+    # IMPORTANT: This feature is experimental and should be used with caution as it can lead to security vulnerabilities.
+    @function_tool
+    def add_tool(self, function_name:str,function_code:str, docstring:str) -> None:
+        """Add a python function (tool) to the list of tools. Example:
+
+        Args:
+            function_name: The name of the function to be added to the list of tools.
+            function_code: The python code of the function to be added to the list of tools. 
+            docstring: The docstring of the tool function to be added. It must contain a description of the function and the parameters using "Agrs:" just like this docstring.
+        """
+
+        modified_function_code = ensure_self_in_function_code(function_code, function_name)
+
+
+        namespace = {
+            '__name__': self.__class__.__module__,  # Add module name to namespace
+            '__file__': __file__
+        }
+
+        exec(modified_function_code, namespace)
+        new_func = namespace[function_name]
+
+        if not hasattr(new_func, 'is_tool'):
+            new_func = function_tool(new_func)
+
+        setattr(self.__class__, function_name, new_func)
+
+        # Run tool discovery again to update the tools list.
+        self.tools, self.tools_schema = self._discover_tools()
+
+        print(f"Tool {function_name} added.")
+
+
+        return "Tool added successfully"
+ 
 
     async def run(self, max_retries:int = 20) -> Any:
         """
@@ -191,7 +264,7 @@ class BaseAgent(BaseModel):
             # #check if tool was called because of tool_choice
             if self.next_tool_map:
                 next_tool = list(self.next_tool_map.values())[0]
-                print(f"Next tool:",next_tool)
+                print(f"In agent: {self.agent_name} | Next tool:",next_tool)
                 self.completion_kwargs["tool_choice"] = {
                     "type": "function",
                     "function": {"name": next_tool}
@@ -213,7 +286,7 @@ class BaseAgent(BaseModel):
             if current_agent.tools_schema:
                 completion_params["tools"] = current_agent.tools_schema
 
-
+            print("Executing agent:",current_agent.agent_name, "with tool choice:",current_agent.completion_kwargs.get("tool_choice",None))
             # Run completion with or without streaming
             if completion_params["stream"]:
                 async for response in current_agent._run_stream(completion_params):
@@ -588,9 +661,6 @@ class BaseAgent(BaseModel):
 class BaseTaskAgent(BaseAgent):
     tool_call_id: str = None
     tool_name: str = None
-    # next_tool: Optional[str] = Field(default=None, description="Next agent to be called")
-    # force_next: Optional[str] = Field(default=None, description="Force the next agent to be called")
-    # manual_call: Optional[Callable[[Any], Dict]] = Field(default=None, description="Function to process complete_task output for next agent call")
 
     def _discover_tools(self):
         """
