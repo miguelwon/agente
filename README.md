@@ -1,22 +1,23 @@
 # agente
 
-
 A very simple Python framework for building AI Agents. 
 
 ## Overview
 
-Agente is a Python framework that allows you to create AI agents just like you create classes and methods.
+Agente is a Python framework that allows you to create AI agents just like you create Python classes and methods. 
 
-The Multi-agent orchestration is supported in an hierarchical way, starting from a main agent that can delegate tasks to specialized agents. 
+Each method can be converted to into a function calling tool using a simple decorator. 
+
+Multi-agent orchestration is supported in an hierarchical way, starting from a main agent that can delegate tasks to specialized agents. 
 
 
 ## Features
 
-- Simple agent creation easily customizable
-- Support for streaming responses
+- Simple agent creation and easily customizable
+- Support for **streaming** responses
 - Tool integration capabilities
 - Multi-agent orchestration
-- Autonomous agent tool  that allows an agent to create its own tools (experimental)
+- **Autonomous agent tool**  that allows an agent to create its own tools (experimental)
 
 ## Installation
 
@@ -49,13 +50,16 @@ class SimpleAgent(BaseAgent):
 agent = SimpleAgent()
 
 # Add a message
-agent.add_message("user", "Tell me a joke about programming.")
+agent.add_message(role = "user", content =  "Tell me a joke about programming.")
 
 # Run the agent and get responses
 responses = [r async for r in agent.run()]
 
+# all_messasges = agent.conv_history.messages
+
+
 # Print the last response
-print(responses[-1].content)
+print(all_messasges[-1].content)
 ```
 
 ## Advanced Usage
@@ -78,7 +82,9 @@ class ToolAgent(BaseAgent):
 
 ### Creating Multi-Agent Systems
 
-You can create complex multi-agent systems where agents can interact with each other:
+You can create complex multi-agent systems where agents can call other agents using the `@agent_tool` decorator. 
+
+For now the framework was designed to work with a hierarchical structure, where a main agent can call other specialized agents that can call other agents and so on. These sub-agents must be `TaskAgents` that inherit from `BaseTaskAgent` and must have a `complete_task` method that returns the result of the task.
 
 ```python
 from agente.core.base import BaseAgent,BaseTaskAgent
@@ -109,7 +115,7 @@ class JokeTeller(BaseTaskAgent):
 class MainAgent(BaseAgent):
     agent_name: str = "main_agent"
     
-    @function_tool(next_tool = "get_joke")
+    @function_tool(next_tool = "get_joke") # To make sure the agent calls the get_joke tool we add the next_tool argument to force it.
     def random_topic(self):
         """Tool to get a random topic.
         """
@@ -117,7 +123,6 @@ class MainAgent(BaseAgent):
         topic = random.choice(topics)
 
         return topic
-
 
 
     @agent_tool()
@@ -129,11 +134,11 @@ class MainAgent(BaseAgent):
         """
 
         joke_agent = JokeTeller()
-        joke_agent.add_message("user", "Tell me a joke about "+joke_topic)
+        joke_agent.add_message(role = "user", content = "Tell me a joke about " + joke_topic)
         return joke_agent
     
 example_agent = MainAgent()
-example_agent.add_message("user", "Tell me a joke.")
+example_agent.add_message(role = "user", content = "Call the tool random_topic to get a random topic and then tell  me a joke about it")
 responses = [r async for r in example_agent.run()]
 print(example_agent.conv_history.messages[-1].content)
 ```
