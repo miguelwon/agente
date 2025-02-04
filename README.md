@@ -6,7 +6,7 @@ A very simple Python framework for building AI Agents.
 
 Agente is a Python framework that allows you to create AI agents just like you create Python classes and methods. 
 
-Each method can be converted to into a function calling tool using a simple decorator. 
+Each method can be converted to into a function calling tool using a simple decorator. This allow you to think the tools as regular class methods within the instante namespace of the agent. 
 
 Multi-agent orchestration is supported in an hierarchical way, starting from a main agent that can delegate tasks to specialized agents. 
 
@@ -55,8 +55,7 @@ agent.add_message(role = "user", content =  "Tell me a joke about programming.")
 # Run the agent and get responses
 responses = [r async for r in agent.run()]
 
-# all_messasges = agent.conv_history.messages
-
+all_messasges = agent.conv_history.messages
 
 # Print the last response
 print(all_messasges[-1].content)
@@ -71,13 +70,28 @@ Agents can be enhanced with tools using the `@function_tool` decorator:
 ```python
 from agente.core.decorators import function_tool
 
-class ToolAgent(BaseAgent):
-    agent_name: str = "ToolAgent"
+class AddAgent(BaseAgent):
+    agent_name: str = "add_agent"
     
     @function_tool
     async def calculate_sum(self, a: int, b: int) -> int:
-        """Calculate the sum of two numbers."""
+        """Calculate the sum of two numbers.
+        
+        Args:
+            a: The first number.
+            b: The second number.        
+        """
         return a + b
+
+agent = AddAgent()
+agent.add_message(role = "user", content = "How much is 10 + 10?")
+responses = [r async for r in agent.run()]
+print(agent.conv_history.messages[-1].content)
+
+
+# Get the logs
+call_logs = agent.log_calls
+completions_logs = agent.logs_completions
 ```
 
 ### Creating Multi-Agent Systems
