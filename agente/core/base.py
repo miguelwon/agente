@@ -21,14 +21,6 @@ from inspect import signature
 import secrets
 
 import ast
-try:
-    # For Python 3.9 and later
-    from ast import unparse as ast_unparse
-except ImportError:
-    # For earlier versions, install astunparse via pip and use it as a fallback
-    import astunparse
-    def ast_unparse(tree):
-        return astunparse.unparse(tree)
 
 def gen_tool_id():
     """Generate a unique tool ID of 24 characters (no special characters)."""
@@ -264,7 +256,6 @@ class BaseAgent(BaseModel):
             # #check if tool was called because of tool_choice
             if self.next_tool_map:
                 next_tool = list(self.next_tool_map.values())[0]
-                print(f"In agent: {self.agent_name} | Next tool:",next_tool)
                 self.completion_kwargs["tool_choice"] = {
                     "type": "function",
                     "function": {"name": next_tool}
@@ -286,8 +277,8 @@ class BaseAgent(BaseModel):
             if current_agent.tools_schema:
                 completion_params["tools"] = current_agent.tools_schema
 
-            print("Executing agent:",current_agent.agent_name, "with tool choice:",current_agent.completion_kwargs.get("tool_choice",None))
             # Run completion with or without streaming
+            print("Executing agent:",current_agent.agent_name)
             if completion_params["stream"]:
                 async for response in current_agent._run_stream(completion_params):
                     yield response
