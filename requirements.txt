@@ -1,0 +1,4 @@
+litellm
+pydantic
+langchain-core
+python-dotenv
