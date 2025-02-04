@@ -68,6 +68,7 @@ print(all_messasges[-1].content)
 Agents can be enhanced with tools using the `@function_tool` decorator:
 
 ```python
+from agente.core.base import BaseAgent
 from agente.core.decorators import function_tool
 
 class AddAgent(BaseAgent):
