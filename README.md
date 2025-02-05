@@ -13,17 +13,26 @@ Multi-agent orchestration is supported in an hierarchical way, starting from a m
 
 ## Features
 
-- Simple agent creation and easily customizable
+- Simple agent creation and easily **customizable**
 - Support for **streaming** responses
-- Tool integration capabilities
-- Multi-agent orchestration
+- **Multi-agent** orchestration (hierarchical)
 - **Autonomous agent tool**  that allows an agent to create its own tools (experimental)
 
 ## Installation
 
+Instal the required dependencies:
+
+´´´bash
+pip install -r requirements.txt
+´´´
+
+Install the package:
+
 ```bash
 pip install agente
 ```
+
+
 
 ## Quick Start
 
