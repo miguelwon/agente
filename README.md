@@ -22,9 +22,9 @@ Multi-agent orchestration is supported in an hierarchical way, starting from a m
 
 Instal the required dependencies:
 
-´´´bash
+```bash
 pip install -r requirements.txt
-´´´
+```
 
 Install the package:
 
