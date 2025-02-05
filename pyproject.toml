@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools", "wheel"]
+requires = ["setuptools", "wheel", "setuptools_scm"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "agente"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A very simple Python framework for building AI Agents"
 authors = [{ name = "Miguel Won", email = "miguelwon@gmail.com" }]
 readme = "README.md"
@@ -25,3 +25,8 @@ classifiers = [
 
 [tool.setuptools]
 packages = ["agente"]
+
+[tool.setuptools_scm]
+write_to = "agente/_version.py"
+version_scheme = "python-simplified-semver"
+local_scheme = "no-local-version"
