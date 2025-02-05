@@ -71,6 +71,7 @@ class BaseAgent(BaseModel):
         default_factory=lambda: ConversationHistory(messages=[])
     )
     tools_mem: List[Dict[str, Any]] = Field(default_factory=list)
+    tools_mem_temp: List[Dict[str, Any]] = Field(default_factory=list)
     log_calls: List[Any] = Field(default_factory=list)
     logs_completions: List[Any] = Field(default_factory=list)
     retry_count: int = Field(default=0)  # Add this field
@@ -360,7 +361,12 @@ class BaseAgent(BaseModel):
             if task_complete:
                 self.state = AgentState.COMPLETE
                 self.agents_queue.remove(self)
-        
+
+            # add tool in the temporary memory to the main memory (must be done only aftert tool execution and agent enqueuing)
+            if self.tools_mem_temp:                
+                self.tools_mem.extend(self.tools_mem_temp)
+                self.tools_mem_temp = []
+
         if not task_complete and not tool_calls:
             self.state = AgentState.WAITING_FOR_USER
 
@@ -467,6 +473,11 @@ class BaseAgent(BaseModel):
             if task_complete:
                 self.state = AgentState.COMPLETE
                 self.agents_queue.remove(self)
+
+            # add tool in the temporary memory to the main memory (must be done only aftert tool execution and agent enqueuing)
+            if self.tools_mem_temp:                
+                self.tools_mem.extend(self.tools_mem_temp)
+                self.tools_mem_temp = []
 
 
         if not task_complete and not tool_calls:
@@ -602,7 +613,7 @@ class BaseAgent(BaseModel):
                     },
                     "type": "function"
                 }
-                agent.tools_mem.append(manual_tool_call)
+                agent.tools_mem_temp.append(manual_tool_call)
             else:
                 warnings.warn(f"Manual call: arguments for {next_tool} are not compatible with the function signature")
 
