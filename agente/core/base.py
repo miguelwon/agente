@@ -101,6 +101,8 @@ class BaseAgent(BaseModel):
     orig_tool_choice: Optional[str] = Field(default=None, description="The original tool choice before the next_tool")
 
     can_add_tools: bool = False
+
+    max_calls_safeguard: int = 30
     
 
     @property
@@ -226,11 +228,15 @@ class BaseAgent(BaseModel):
         Run the agent asynchronously, processing messages and executing tools.
         """
         n_calls = 0
-        
+        n_calls_safeguard = 0
         while self.agents_queue[0].state == AgentState.READY and n_calls < max_retries:
+            n_calls_safeguard += 1
+            if n_calls_safeguard >= self.max_calls_safeguard:
+                raise ValueError("Max calls safeguard reached")
+
+
             n_calls += 1
             current_agent = self.agents_queue[0] 
-                
             # Handle tools in memory first
             if current_agent.tools_mem:
                 current_agent._add_message(role="assistant", tool_calls=current_agent.tools_mem)
@@ -278,6 +284,14 @@ class BaseAgent(BaseModel):
             if current_agent.tools_schema:
                 completion_params["tools"] = current_agent.tools_schema
 
+
+            #check if tools value has a match with the tools_functions keys
+            if completion_params["tools"]:
+                for tool in completion_params["tools"]:
+                    if tool["function"]["name"] not in current_agent.tools_functions and tool["function"]["name"] not in current_agent.tools_agent:
+                        raise ValueError(f"Tool {tool['function']['name']} not found in tools_functions")
+
+        
             # Run completion with or without streaming
             print("Executing agent:",current_agent.agent_name)
             if completion_params["stream"]:
@@ -288,10 +302,10 @@ class BaseAgent(BaseModel):
                     yield response
 
 
-        if n_calls >= max_retries:
-            warnings.warn(f"Max retries ({max_retries}) reached for agent {self.agent_name}")
-            self.add_message("assistant", "Max retries reached")
-
+            if n_calls >= max_retries:
+                warnings.warn(f"Max retries ({max_retries}) reached for agent {self.agent_name}")
+                self.add_message("assistant", "Max retries reached")
+            
 
     async def _run_no_stream(
         self,
@@ -304,7 +318,6 @@ class BaseAgent(BaseModel):
         self.log_calls.append(completion_params)
         _response = await acompletion(**completion_params)
         self.logs_completions.append(_response)
-
 
         content = _response.choices[0].message.content
         tool_calls = []
@@ -407,6 +420,11 @@ class BaseAgent(BaseModel):
                     tool_id = delta.tool_calls[0].id
                     tool_name = delta.tool_calls[0].function.name
                     tool_calls_info[tool_id]["name"] = tool_name
+                    
+                    #check if contains arguments
+                    if hasattr(delta.tool_calls[0].function, "arguments"):
+                        content = delta.tool_calls[0].function.arguments
+                        tool_calls_info[tool_id]["arguments"] += content
                     continue
                 content = delta.tool_calls[0].function.arguments
                 tool_calls_info[tool_id]["arguments"] += content
@@ -456,10 +474,7 @@ class BaseAgent(BaseModel):
         ]
 
         if tool_calls:
-            task_complete = False
             for tool in tool_calls:
-                if tool.function.name == "complete_task":
-                    task_complete = True
                 self.tools_mem.append(tool.model_dump())
 
             if not usage:
@@ -470,7 +485,7 @@ class BaseAgent(BaseModel):
             await self._execute_function_tools()
             self._enqueue_agent_tools()
 
-            if task_complete:
+            if hasattr(self,"completed_task") and self.completed_task:
                 self.state = AgentState.COMPLETE
                 self.agents_queue.remove(self)
 
@@ -486,6 +501,7 @@ class BaseAgent(BaseModel):
 
     async def _execute_function_tools(self):
         """Executes function tools in parallel."""
+        #TODO: must check if there is more than on complete_task call. If so, and error must be raised. Sometimes the model call multiple complete_task tools.
         tasks = []
         for tool in self.tools_mem:
             if tool["function"]["name"] in self.tools_functions:
@@ -543,7 +559,7 @@ class BaseAgent(BaseModel):
             role="tool",
             content=json.dumps(result),
             tool_call_id=tool["id"],
-            tool_name=this_tool_name,
+            # tool_name=this_tool_name, # remove because of Mistral model
         )
 
 
@@ -554,7 +570,7 @@ class BaseAgent(BaseModel):
                 role="tool",
                 content=json.dumps(result),
                 tool_call_id=self.tool_call_id,
-                tool_name=self.tool_name,
+                # tool_name=self.tool_name, # remove because of Mistral model
             )
 
             agent_method = self.parent_agent.tools_agent[self.tool_name]
@@ -571,6 +587,8 @@ class BaseAgent(BaseModel):
             self.parent_agent.tools_mem = [
                 t for t in self.parent_agent.tools_mem if t["id"] != self.tool_call_id
             ]
+
+            self.completed_task = True
 
         else:
 
@@ -655,7 +673,7 @@ class BaseAgent(BaseModel):
             role="tool",
             content=json.dumps({"error": error_message}),
             tool_call_id=tool["id"],
-            tool_name=tool["function"]["name"],
+            # tool_name=tool["function"]["name"], # remove because of Mistral model
         )
         # remove the tool from memory
         self.tools_mem = [t for t in self.tools_mem if t["id"] != tool["id"]]
@@ -663,6 +681,7 @@ class BaseAgent(BaseModel):
 class BaseTaskAgent(BaseAgent):
     tool_call_id: str = None
     tool_name: str = None
+    completed_task: bool = False
 
     def _discover_tools(self):
         """
