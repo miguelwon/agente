@@ -13,7 +13,7 @@ from langchain_core.utils.function_calling import convert_to_openai_function
 
 from agente.models.schemas import (
     Message, Response, StreamResponse, ConversationHistory,
-    ToolCall, FunctionCall,Usage
+    ToolCall, FunctionCall,Usage,Content,ThinkingBlock
 )
 from .decorators import function_tool
 
@@ -104,6 +104,7 @@ class BaseAgent(BaseModel):
 
     max_calls_safeguard: int = 30
     
+    silent: bool = False
 
     @property
     def completion_config(self) -> Dict[str, Any]:
@@ -217,7 +218,8 @@ class BaseAgent(BaseModel):
         # Run tool discovery again to update the tools list.
         self.tools, self.tools_schema = self._discover_tools()
 
-        print(f"Tool {function_name} added.")
+        if not self.silent:
+            print(f"Tool {function_name} added.")
 
 
         return "Tool added successfully"
@@ -284,16 +286,18 @@ class BaseAgent(BaseModel):
             if current_agent.tools_schema:
                 completion_params["tools"] = current_agent.tools_schema
 
+            
 
             #check if tools value has a match with the tools_functions keys
-            if completion_params["tools"]:
+            if 'tools' in completion_params:
                 for tool in completion_params["tools"]:
                     if tool["function"]["name"] not in current_agent.tools_functions and tool["function"]["name"] not in current_agent.tools_agent:
                         raise ValueError(f"Tool {tool['function']['name']} not found in tools_functions")
 
         
             # Run completion with or without streaming
-            print("Executing agent:",current_agent.agent_name)
+            if not current_agent.silent:
+                print("Executing agent:",current_agent.agent_name)
             if completion_params["stream"]:
                 async for response in current_agent._run_stream(completion_params):
                     yield response
@@ -342,6 +346,11 @@ class BaseAgent(BaseModel):
         else:
             usage = None
 
+        thinking_blocks = []
+        if hasattr(_response.choices[0].message,"thinking_blocks"):
+            for block in _response.choices[0].message.thinking_blocks:
+                thinking_blocks.append(ThinkingBlock(type=block['type'], thinking=block['thinking'], signature=block['signature']))
+
 
         response = Response(
             call_id=_response.id,
@@ -349,15 +358,22 @@ class BaseAgent(BaseModel):
             role=_response.choices[0].message.role,
             content=content or "",
             tool_calls=[t.model_dump() for t in tool_calls],
+            thinking_blocks = thinking_blocks,
             usage=usage if hasattr(_response,"usage") else None
         )
         self.responses.append(response)
 
         yield response
 
+        if content or thinking_blocks:
+            content_objects = []
+            if content:
+                content_objects.append(Content(type="text", text=content))
+            if thinking_blocks:
+                for block in thinking_blocks:
+                    content_objects.append(Content(type=block.type, text=block.thinking, signature=block.signature))
 
-        if content:
-            self._add_message(role="assistant", content=content)
+            self._add_message(role="assistant", content=content_objects)    
         if tool_calls:            
             for tool in tool_calls:
                 if tool.function.name == "complete_task":
@@ -397,6 +413,7 @@ class BaseAgent(BaseModel):
         tool_calls_info = defaultdict(lambda: defaultdict(str))
         current_content = ""
         usage = None
+        reasoning_content = ""
         task_complete = False
 
         self.log_calls.append(completion_params)
@@ -414,6 +431,9 @@ class BaseAgent(BaseModel):
             if hasattr(delta, "content") and delta.content:
                 current_content += delta.content
                 content = delta.content
+            
+            if hasattr(delta, "reasoning_content") and delta.reasoning_content:
+                reasoning_content += delta.reasoning_content
 
             elif hasattr(delta, "tool_calls") and delta.tool_calls:
                 if delta.tool_calls[0].id is not None:
@@ -427,7 +447,8 @@ class BaseAgent(BaseModel):
                         tool_calls_info[tool_id]["arguments"] += content
                     continue
                 content = delta.tool_calls[0].function.arguments
-                tool_calls_info[tool_id]["arguments"] += content
+                if tool_id is not None:
+                    tool_calls_info[tool_id]["arguments"] += content
 
             if chunk.choices[0].delta.role:
                 role = chunk.choices[0].delta.role
@@ -442,6 +463,8 @@ class BaseAgent(BaseModel):
                 agent_name=self.agent_name,
                 role=role,
                 content=content,
+                reasoning_content= delta.reasoning_content if hasattr(delta,"reasoning_content") else None,
+                is_thinking=True if hasattr(delta,"reasoning_content") else False,
                 is_tool_call=bool(tool_id),
                 tool_name=tool_name,
                 is_tool_exec=False,
@@ -453,13 +476,19 @@ class BaseAgent(BaseModel):
 
 
 
-        if current_content:
-            if not usage:
-                self._add_message(role="assistant", content=current_content)
-            else:
-                self._add_message(role="assistant", content=current_content, usage=usage)
-            # usage = None # because at this point usage already accounts for the tokens used for the tool calls
+        if current_content or reasoning_content:
 
+            content_objects = []
+            if current_content:
+                content_objects.append(Content(type="text", text=current_content))
+            if reasoning_content:
+                content_objects.append(Content(type="thinking", text=reasoning_content))
+
+            if not usage:
+                self._add_message(role="assistant", content=content_objects)
+            else:
+                self._add_message(role="assistant", content=content_objects, usage=usage)
+            usage = None # because at this point usage already accounts for the tokens used for the tool calls
 
         tool_calls = [
             ToolCall(
@@ -472,6 +501,9 @@ class BaseAgent(BaseModel):
             )
             for i, (id, tool_info) in enumerate(tool_calls_info.items())
         ]
+
+        # for i, (id, tool_info) in enumerate(tool_calls_info.items()):
+        #     print(i,id, tool_info)
 
         if tool_calls:
             for tool in tool_calls:
@@ -539,7 +571,8 @@ class BaseAgent(BaseModel):
         Asynchronously execute a single function tool and add the result to the conversation history.
         """
         this_tool_name = tool["function"]["name"]
-        print(f"Executing tool: {this_tool_name} from agent {self.agent_name}")
+        if not self.silent:
+            print(f"Executing tool: {this_tool_name} from agent {self.agent_name}")
 
         try:
             arguments = json.loads(tool["function"]["arguments"])
@@ -643,23 +676,35 @@ class BaseAgent(BaseModel):
                 agent.next_tool_map = {k:v for k,v in agent.next_tool_map.items() if v != tool_name}
 
 
-    def add_message(self, role: str, content: Optional[str] = None, **kwargs) -> None:
+    def add_message(self, role: str, content: Optional[str | List[Content]] = None, **kwargs) -> None:
         """
         Add a message to the conversation history of the first agent in the queue (current agent when called).
         """
+        if isinstance(content, str):
+            content_objects = [Content(type="text", text=content)]
+        else:
+            content_objects = content
+            
         self.agents_queue[0].conv_history.messages.append(
             Message(
-                role=role, agent_name=self.agents_queue[0].agent_name, content=content, **kwargs
+                role=role, agent_name=self.agents_queue[0].agent_name, content=content_objects, **kwargs
             )
         )
+
         self.agents_queue[0].state = AgentState.READY
 
-    def _add_message(self, role: str, content: Optional[str] = None, **kwargs) -> None:
+    def _add_message(self, role: str, content: Optional[str | List[Content]] = None, **kwargs) -> None:
         """
         Add a message to the conversation history of the self agent.
         """
+
+        if isinstance(content, str):
+            content_objects = [Content(type="text", text=content)]
+        else:
+            content_objects = content
+
         self.conv_history.messages.append(
-            Message(role=role, agent_name=self.agent_name, content=content, **kwargs)
+            Message(role=role, agent_name=self.agent_name, content=content_objects, **kwargs)
         )
 
     def _handle_tool_error(
