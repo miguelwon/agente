@@ -13,7 +13,7 @@ from langchain_core.utils.function_calling import convert_to_openai_function
 
 from agente.models.schemas import (
     Message, Response, StreamResponse, ConversationHistory,
-    ToolCall, FunctionCall,Usage,Content,ThinkingBlock
+    ToolCall, FunctionCall,Usage,Content,ThinkingBlock,ContentThinking,ContentRedactedThinking
 )
 from .decorators import function_tool
 
@@ -349,7 +349,11 @@ class BaseAgent(BaseModel):
         thinking_blocks = []
         if hasattr(_response.choices[0].message,"thinking_blocks"):
             for block in _response.choices[0].message.thinking_blocks:
-                thinking_blocks.append(ThinkingBlock(type=block['type'], thinking=block['thinking'], signature=block['signature']))
+                if 'thinking' == block['type']:
+                    thinking_blocks.append(ThinkingBlock(type="thinking", thinking=block['thinking'], signature=block['signature']))
+                elif 'redacted_thinking' == block['type']:
+                    thinking_blocks.append(ThinkingBlock(type="redacted_thinking", data=block['data']))
+
 
 
         response = Response(
@@ -367,11 +371,14 @@ class BaseAgent(BaseModel):
 
         if content or thinking_blocks:
             content_objects = []
-            if content:
-                content_objects.append(Content(type="text", text=content))
             if thinking_blocks:
                 for block in thinking_blocks:
-                    content_objects.append(Content(type=block.type, text=block.thinking, signature=block.signature))
+                    if block.type == "thinking":
+                        content_objects.append(ContentThinking(type="thinking", text=block.thinking, signature=block.signature))
+                    elif block.type == "redacted_thinking":
+                        content_objects.append(ContentRedactedThinking(type="redacted_thinking", data=block.data))
+            if content:
+                content_objects.append(Content(type="text", text=content))
 
             self._add_message(role="assistant", content=content_objects)    
         if tool_calls:            
@@ -415,9 +422,10 @@ class BaseAgent(BaseModel):
         usage = None
         reasoning_content = ""
         task_complete = False
+        # Track thinking blocks by type to accumulate their content
 
         self.log_calls.append(completion_params)
-
+        stream_thinking_blocks = []
         async for chunk in await acompletion(**completion_params):
             self.logs_completions.append(chunk)
             if hasattr(chunk,"usage"):
@@ -434,7 +442,15 @@ class BaseAgent(BaseModel):
             
             if hasattr(delta, "reasoning_content") and delta.reasoning_content:
                 reasoning_content += delta.reasoning_content
-
+            # Process thinking blocks for this chunk only
+            current_thinking_blocks = []
+            if hasattr(delta, "thinking_blocks") and delta.thinking_blocks:
+                for block in delta.thinking_blocks:          
+                    if 'thinking' == block['type']:
+                        current_thinking_blocks.append(ThinkingBlock(type="thinking", thinking=block['thinking'], signature=block['signature']))
+                    elif 'redacted_thinking' == block['type']:
+                        current_thinking_blocks.append(ThinkingBlock(type="redacted_thinking",data=block['data']))
+            
             elif hasattr(delta, "tool_calls") and delta.tool_calls:
                 if delta.tool_calls[0].id is not None:
                     tool_id = delta.tool_calls[0].id
@@ -450,6 +466,8 @@ class BaseAgent(BaseModel):
                 if tool_id is not None:
                     tool_calls_info[tool_id]["arguments"] += content
 
+            stream_thinking_blocks += current_thinking_blocks
+
             if chunk.choices[0].delta.role:
                 role = chunk.choices[0].delta.role
             
@@ -457,6 +475,7 @@ class BaseAgent(BaseModel):
                 usage = Usage(completion_tokens=chunk.usage.completion_tokens,
                               prompt_tokens=chunk.usage.prompt_tokens,
                               total_tokens=chunk.usage.total_tokens)
+
 
             stream_response = StreamResponse(
                 call_id=chunk.id,
@@ -469,25 +488,46 @@ class BaseAgent(BaseModel):
                 tool_name=tool_name,
                 is_tool_exec=False,
                 tool_id=tool_id,
+                thinking_blocks=current_thinking_blocks if current_thinking_blocks else None,  # Add thinking blocks
                 usage=usage if hasattr(chunk,"usage") else None
             )
             self.stream_responses.append(stream_response)
             yield stream_response
+            
 
+        
 
+        # After streaming is complete, concatenate the thinking blocks by type
+        final_thinking_blocks = []
+        signature = None
+        thinking = ""
+        data = None
+        for block in stream_thinking_blocks:
+            if block.type == "thinking":
+                thinking += block.thinking
+                signature = block.signature
+            elif block.type == "redacted_thinking":
+                data = block.data
+        if signature:
+            final_thinking_blocks.append(ThinkingBlock(type="thinking", thinking=thinking, signature=signature))
+        if data:
+            final_thinking_blocks.append(ThinkingBlock(type="redacted_thinking", data=data))
 
-        if current_content or reasoning_content:
-
+        if current_content or final_thinking_blocks:
             content_objects = []
+            if final_thinking_blocks:
+                for block in final_thinking_blocks:
+                    if block.type == "thinking":
+                        content_objects.append(ContentThinking(type="thinking", text=block.thinking, signature=block.signature))
+                    elif block.type == "redacted_thinking":
+                        content_objects.append(ContentRedactedThinking(type="redacted_thinking", data=block.data))
             if current_content:
                 content_objects.append(Content(type="text", text=current_content))
-            if reasoning_content:
-                content_objects.append(Content(type="thinking", text=reasoning_content))
-
             if not usage:
                 self._add_message(role="assistant", content=content_objects)
             else:
                 self._add_message(role="assistant", content=content_objects, usage=usage)
+
             usage = None # because at this point usage already accounts for the tokens used for the tool calls
 
         tool_calls = [

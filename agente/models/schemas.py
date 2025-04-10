@@ -15,8 +15,15 @@ class FunctionCall(BaseModel):
 class Content(BaseModel):
     type: str
     text: str
+
+class ContentThinking(BaseModel):
+    type: str
+    text: str
     signature: Optional[str] = None
 
+class ContentRedactedThinking(BaseModel):
+    type: str
+    data: str
 
 class ToolCall(BaseModel):
     index: int = Field(default=None)
@@ -27,12 +34,13 @@ class ToolCall(BaseModel):
 class ThinkingBlock(BaseModel):
     type: str 
     thinking: str 
-    signature: str
+    signature: Optional[str] = None
+    data: Optional[str] = None
 
 class Message(BaseModel):
     role: str
     agent_name: str
-    content: Optional[List[Content]] = Field(default_factory=list)
+    content: Optional[List[Content|ContentThinking|ContentRedactedThinking]] = Field(default_factory=list)
     tool_calls: Optional[List[dict]] = None
     tool_call_id: Optional[str] = None
     tool_name: Optional[str] = None
@@ -81,7 +89,7 @@ class StreamResponse(BaseModel):
     tool_id: Optional[str] = None
     timestamp: datetime = Field(default_factory=datetime.utcnow)
     usage: Optional[Usage] = Field(default=None)
-    
+    thinking_blocks: Optional[List[ThinkingBlock]] = Field(default=None)
     model_config = {
         "exclude_none": True
     }
