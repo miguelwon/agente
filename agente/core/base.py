@@ -226,9 +226,8 @@ class BaseAgent(BaseModel):
     def _setup_completion_config(self) -> None:
         """Set up completion configuration with defaults."""
         default_kwargs = {
-            "model": "claude-3-7-sonnet-latest",
+            "model": "gpt-4.1",
             "stream": False,
-            "temperature": 0.75,
             "max_tokens": None,
         }
         self.completion_kwargs = {**default_kwargs, **self.completion_kwargs}
@@ -819,7 +818,7 @@ class BaseAgent(BaseModel):
                 content_objects.append(
                     ContentThinking(
                         type="thinking",
-                        text=block.thinking,
+                        thinking=block.thinking,
                         signature=block.signature
                     )
                 )
@@ -853,6 +852,8 @@ class BaseAgent(BaseModel):
                         signature=block.signature
                     )
                 consolidated["thinking"].thinking += block.thinking
+                if block.signature:
+                    consolidated["thinking"].signature = block.signature
             elif block.type == "redacted_thinking":
                 consolidated["redacted_thinking"] = block
         

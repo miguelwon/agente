@@ -52,7 +52,7 @@ class Content(BaseModel):
 class ContentThinking(BaseModel):
     """Thinking content with optional signature."""
     type: Literal["thinking"] = Field("thinking", description="Content type")
-    text: str = Field(..., description="Thinking text")
+    thinking: str = Field(..., description="Thinking text")
     signature: Optional[str] = Field(None, description="Optional signature")
 
 
