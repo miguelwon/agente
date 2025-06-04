@@ -2,8 +2,6 @@
 private/
 old/
 
-_version.py
-
 # Python
 __pycache__/
 *.py[cod]
