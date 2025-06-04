@@ -2,6 +2,10 @@
 private/
 old/
 
+# Generated files
+*/_version.py
+**/_version.py
+
 # Python
 __pycache__/
 *.py[cod]
