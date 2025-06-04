@@ -24,12 +24,10 @@ classifiers = [
 ]
 
 [tool.setuptools]
-packages = ["agente", "agente.core", "agente.models"]
+packages = ["agente"]
 # OR use find packages
 # packages = {find = {}}
 
 [tool.setuptools_scm]
 write_to = "agente/_version.py"
-version_scheme = "no-guess-dev"
 local_scheme = "no-local-version"
-tag_regex = "^(?P<prefix>v)?(?P<version>[^\\+]+)(?P<suffix>.*)?$"
