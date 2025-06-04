@@ -24,7 +24,9 @@ classifiers = [
 ]
 
 [tool.setuptools]
-packages = ["agente"]
+packages = ["agente", "agente.core", "agente.models"]
+# OR use find packages
+# packages = {find = {}}
 
 [tool.setuptools_scm]
 write_to = "agente/_version.py"
