@@ -36,13 +36,17 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install build twine
+          pip install build twine setuptools_scm
 
-      - name: Build package
+      - name: Verify Version Number
+        id: verify_version
+        run: echo "version=$(python -m setuptools_scm)" >> $GITHUB_OUTPUT
+
+      - name: "Build package (version ${{ steps.verify_version.outputs.version }})"
         run: python -m build
 
       - name: Publish package to PyPI
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: twine upload dist/*
+        run: twine upload --skip-existing dist/*
