@@ -2,7 +2,13 @@ name: Publish Python Package
 
 on:
   release:
-    types: [created, edited, published]
+    types: [created, published] # For future automatic releases
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'The git tag to build and publish (e.g., v0.1.3)'
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -16,7 +22,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # This ensures all tags and history are fetched
+          # For release events, github.ref is the tag.
+          # For manual runs, we use the tag provided in the input.
+          ref: ${{ github.event_name == 'release' && github.ref || github.event.inputs.tag }}
+          fetch-depth: 0 # This ensures all tags and history are fetched
           fetch-tags: true
 
       - name: Set up Python
