@@ -675,7 +675,7 @@ class BaseAgent(BaseModel):
         """
         if not chunk.choices:
             return None
-        
+                
         delta = chunk.choices[0].delta
         content = None
         
@@ -700,6 +700,9 @@ class BaseAgent(BaseModel):
         if hasattr(delta, 'thinking_blocks') and delta.thinking_blocks:
             thinking_blocks = self._extract_thinking_blocks(delta)
             stream_state.thinking_blocks.extend(thinking_blocks)
+            for block in thinking_blocks:
+                if block.type == "thinking":
+                    stream_state.signature = block.signature
         
         # Extract usage if present
         usage = None
@@ -719,7 +722,7 @@ class BaseAgent(BaseModel):
                 role=stream_state.role,
                 content=content,
                 reasoning_content=delta.reasoning_content if hasattr(delta, 'reasoning_content') else None,
-                is_thinking=bool(stream_state.reasoning_content),
+                is_thinking=not bool(stream_state.signature),
                 is_tool_call=bool(stream_state.current_tool_id),
                 tool_name=stream_state.current_tool_name,
                 tool_id=stream_state.current_tool_id,
@@ -1420,6 +1423,7 @@ class StreamingState:
         self.current_tool_name: Optional[str] = None
         self.tool_calls_info: Dict[str, Dict[str, str]] = {}
         self.thinking_blocks: List[ThinkingBlock] = []
+        self.signature: Optional[str] = None
         self.usage: Optional[Usage] = None
 
 
