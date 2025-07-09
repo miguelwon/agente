@@ -5,7 +5,7 @@ import traceback
 import warnings
 from collections import defaultdict, deque
 from enum import Enum
-from typing import Any, Callable, Deque, Dict, List, Optional, Tuple, Type, Union
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple, Type, Union, Literal
 import logging
 
 # Third-party imports
@@ -265,7 +265,8 @@ class BaseAgent(BaseModel):
     async def run(
         self, 
         max_retries: Optional[int] = None, 
-        stream: Optional[bool] = None
+        stream: Optional[bool] = None,
+        output_format: Literal['agente', 'litellm'] = 'agente'
     ) -> Union[List[Union[Response, StreamResponse]], Any]:
         """
         Run the agent asynchronously.
@@ -276,10 +277,11 @@ class BaseAgent(BaseModel):
                 If True, returns an async generator that yields responses
                 If False, returns a list of all responses
                 If None, uses the current completion_kwargs["stream"] setting
+            output_format: The format of the response ('agente' or 'litellm'). Defaults to 'agente'.
             
         Returns:
-            If stream=False: List of Response/StreamResponse objects
-            If stream=True: Async generator yielding Response/StreamResponse objects
+            If stream=False: List of Response objects (if 'agente') or litellm ModelResponse objects (if 'litellm')
+            If stream=True: Async generator yielding StreamResponse objects (if 'agente') or litellm stream chunks (if 'litellm')
             
         Raises:
             MaxRetriesExceededError: If maximum retries are exceeded
@@ -294,16 +296,16 @@ class BaseAgent(BaseModel):
         
         if is_streaming:
             # For streaming, return the generator directly
-            return self._run_generator(max_retries)
+            return self._run_generator(max_retries, output_format=output_format)
         else:
             # For non-streaming, collect all responses and return as list
             responses = []
-            async for response in self._run_generator(max_retries):
+            async for response in self._run_generator(max_retries, output_format=output_format):
                 responses.append(response)
             return responses
 
 
-    async def _run_generator(self, max_retries: Optional[int] = None) -> Any:
+    async def _run_generator(self, max_retries: Optional[int] = None, output_format: Literal['agente', 'litellm'] = 'agente') -> Any:
         """
         Internal generator method that contains the original run logic.
         
@@ -372,10 +374,10 @@ class BaseAgent(BaseModel):
                 
                 # Execute completion
                 if completion_params["stream"]:
-                    async for response in current_agent._run_stream(completion_params):
+                    async for response in current_agent._run_stream(completion_params, output_format=output_format):
                         yield response
                 else:
-                    async for response in current_agent._run_no_stream(completion_params):
+                    async for response in current_agent._run_no_stream(completion_params, output_format=output_format):
                         yield response
 
                 
@@ -439,15 +441,16 @@ class BaseAgent(BaseModel):
         return params
 
 
-    async def _run_no_stream(self, completion_params: Dict[str, Any]) -> Any:
+    async def _run_no_stream(self, completion_params: Dict[str, Any], output_format: Literal['agente', 'litellm'] = 'agente') -> Any:
         """
         Execute completion without streaming.
         
         Args:
             completion_params: Parameters for the completion API
+            output_format: The format of the response ('agente' or 'litellm').
             
         Yields:
-            Response objects
+            Response objects or litellm ModelResponse.
         """
         try:
             # Log the API call
@@ -460,7 +463,11 @@ class BaseAgent(BaseModel):
             # Process the response
             response = self._process_api_response(api_response)
             self.responses.append(response)
-            yield response
+            
+            if output_format == 'litellm':
+                yield api_response
+            else:
+                yield response
             
             # Handle message and tool calls
             await self._handle_response_content(response)
@@ -474,15 +481,16 @@ class BaseAgent(BaseModel):
             raise AgentExecutionError(f"Completion failed: {e}") from e
 
 
-    async def _run_stream(self, completion_params: Dict[str, Any]) -> Any:
+    async def _run_stream(self, completion_params: Dict[str, Any], output_format: Literal['agente', 'litellm'] = 'agente') -> Any:
         """
         Execute completion with streaming.
         
         Args:
             completion_params: Parameters for the completion API
+            output_format: The format of the response ('agente' or 'litellm').
             
         Yields:
-            StreamResponse objects
+            StreamResponse objects or litellm stream chunks.
         """
         try:
             # Initialize streaming state
@@ -499,6 +507,10 @@ class BaseAgent(BaseModel):
                 stream_response = self._process_stream_chunk(chunk, stream_state)
                 if stream_response:
                     self.stream_responses.append(stream_response)
+
+                if output_format == 'litellm':
+                    yield chunk
+                elif stream_response:
                     yield stream_response
             
             # Handle accumulated content after streaming
