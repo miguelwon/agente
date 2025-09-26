@@ -62,12 +62,10 @@ agent = SimpleAgent()
 agent.add_message(role = "user", content =  "Tell me a joke about programming.")
 
 # Run the agent and get responses
-responses = [r async for r in agent.run()]
-
-all_messasges = agent.conv_history.messages
+responses = await agent.run()
 
 # Print the last response
-print(all_messasges[-1].content)
+print(responses[-1].content)
 ```
 
 ## Advanced Usage
@@ -95,8 +93,8 @@ class AddAgent(BaseAgent):
 
 agent = AddAgent()
 agent.add_message(role = "user", content = "How much is 10 + 10?")
-responses = [r async for r in agent.run()]
-print(agent.conv_history.messages[-1].content)
+responses = await agent.run()
+print(responses[-1].content)
 
 
 # Get the logs
@@ -163,8 +161,8 @@ class MainAgent(BaseAgent):
     
 example_agent = MainAgent()
 example_agent.add_message(role = "user", content = "Call the tool random_topic to get a random topic and then tell  me a joke about it")
-responses = [r async for r in example_agent.run()]
-print(example_agent.conv_history.messages[-1].content)
+responses = await example_agent.run()
+print(responses[-1].content)
 ```
 
 ## Examples
