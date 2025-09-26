@@ -183,6 +183,7 @@ class BaseAgent(BaseModel):
     )
     can_add_tools: bool = Field(False, description="Whether dynamic tool addition is allowed")
     max_calls_safeguard: int = Field(30, description="Maximum number of calls to prevent infinite loops")
+    retry_count: int = Field(0, description="Retry count")
     max_retries: int = Field(20, description="Maximum retry attempts")
     silent: bool = Field(False, description="Whether to suppress console output")
     
@@ -266,7 +267,7 @@ class BaseAgent(BaseModel):
         self, 
         max_retries: Optional[int] = None, 
         stream: Optional[bool] = None,
-        output_format: Literal['agente', 'litellm'] = 'agente'
+        output_format: Literal['agente', 'litellm'] = 'litellm'
     ) -> Union[List[Union[Response, StreamResponse]], Any]:
         """
         Run the agent asynchronously.
@@ -277,7 +278,7 @@ class BaseAgent(BaseModel):
                 If True, returns an async generator that yields responses
                 If False, returns a list of all responses
                 If None, uses the current completion_kwargs["stream"] setting
-            output_format: The format of the response ('agente' or 'litellm'). Defaults to 'agente'.
+            output_format: The format of the response ('agente' or 'litellm'). Defaults to 'litellm'.
             
         Returns:
             If stream=False: List of Response objects (if 'agente') or litellm ModelResponse objects (if 'litellm')
@@ -305,7 +306,7 @@ class BaseAgent(BaseModel):
             return responses
 
 
-    async def _run_generator(self, max_retries: Optional[int] = None, output_format: Literal['agente', 'litellm'] = 'agente') -> Any:
+    async def _run_generator(self, max_retries: Optional[int] = None, output_format: Literal['agente', 'litellm'] = 'litellm') -> Any:
         """
         Internal generator method that contains the original run logic.
         
