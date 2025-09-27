@@ -5,7 +5,7 @@ import traceback
 import warnings
 from collections import defaultdict, deque
 from enum import Enum
-from typing import Any, Callable, Deque, Dict, List, Optional, Tuple, Type, Union, Literal
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple, Type, Union, Literal, Annotated
 import logging
 
 # Third-party imports
@@ -29,6 +29,78 @@ from .exceptions import (
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+
+def ensure_self_in_function_code(function_code: str, function_name: str) -> str:
+    """
+    Ensures that the function code has 'self' as the first parameter.
+    Uses AST parsing for robustness.
+    
+    Args:
+        function_code: The original function code
+        function_name: The name of the function
+        
+    Returns:
+        Modified function code with 'self' as first parameter
+    """
+    import ast
+    import sys
+    
+    try:
+        # Parse the function code
+        tree = ast.parse(function_code)
+        
+        # Look for the function definition with the given name
+        modified = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == function_name:
+                # Check if 'self' is already the first parameter
+                if not node.args.args or node.args.args[0].arg != 'self':
+                    # Create 'self' argument
+                    if sys.version_info >= (3, 9):
+                        self_arg = ast.arg(arg='self', annotation=None)
+                    else:
+                        self_arg = ast.arg(arg='self', annotation=None)
+                    
+                    # Insert 'self' as first parameter
+                    node.args.args.insert(0, self_arg)
+                    modified = True
+                break
+        
+        if not modified:
+            return function_code
+        
+        # Convert back to string
+        if sys.version_info >= (3, 9):
+            return ast.unparse(tree)
+        else:
+            # For older Python versions, fall back to a simple approach
+            # or use astor if available
+            try:
+                import astor
+                return astor.to_source(tree)
+            except ImportError:
+                # Fallback to regex approach for older Python versions
+                import re
+                func_pattern = rf'def\s+{function_name}\s*\((.*?)\)'
+                match = re.search(func_pattern, function_code, re.DOTALL)
+                
+                if match:
+                    params = match.group(1).strip()
+                    if not params or not params.startswith('self'):
+                        if params:
+                            new_params = f"self, {params}"
+                        else:
+                            new_params = "self"
+                        new_def = f"def {function_name}({new_params})"
+                        function_code = re.sub(func_pattern, new_def, function_code, count=1)
+                
+                return function_code
+                
+    except SyntaxError:
+        # If AST parsing fails, return original code
+        logger.warning(f"Failed to parse function code for {function_name}, returning original")
+        return function_code
 
 
 class AgentState:
@@ -268,6 +340,64 @@ class BaseAgent(BaseModel):
     def tools_agent(self) -> Dict[str, Callable]:
         """Get agent tools mapping."""
         return self.tool_registry.tools_agent if self.tool_registry else {}
+    
+    # IMPORTANT: This feature is experimental and should be used with caution as it can lead to security vulnerabilities.
+    @function_tool
+    def add_tool(self, 
+                    function_name: Annotated[str, "The name of the function to be added to the list of tools."],
+                    function_code: Annotated[str, "The python code of the function to be added to the list of tools, with a docstring"]) -> str:
+        """ Call this tool to add a new tool (a python function) to the main list of available tools. Example:
+
+function_name = "calculate_circle_area"
+function_code = '''
+def calculate_circle_area(self, radius: float) -> float:
+    \"\"\"Calculate the area of a circle given its radius.
+
+    Args:
+        radius: The radius of the circle (must be a positive number).
+    \"\"\"
+    import math
+    return math.pi * radius ** 2
+'''
+"""
+
+        if not self.can_add_tools:
+            return "Error: This agent is not configured to add tools dynamically. Set can_add_tools=True to enable this feature."
+        
+        
+        # Ensure self parameter is in the function code
+        modified_function_code = ensure_self_in_function_code(function_code, function_name)
+
+        # Create namespace for exec
+        namespace = {
+            '__name__': self.__class__.__module__,  # Add module name to namespace
+            '__file__': __file__,
+        }
+        
+        try:
+            # Execute the function code
+            exec(modified_function_code, namespace)
+            new_func = namespace[function_name]
+            
+            # Apply function_tool decorator if not already applied
+            if not hasattr(new_func, 'is_tool'):
+                new_func = function_tool(new_func)
+            
+            # Add the function to the class
+            setattr(self.__class__, function_name, new_func)
+            
+            # Rediscover tools to update the registry
+            self.tool_registry.discover_tools()
+            
+            if not self.silent:
+                print(f"Tool {function_name} added successfully.")
+            
+            return f"Tool {function_name} added successfully"
+            
+        except Exception as e:
+            error_msg = f"Failed to add tool {function_name}: {str(e)}"
+            logger.error(error_msg)
+            return f"Error: {error_msg}"
 
 
     async def run(
