@@ -186,6 +186,13 @@ class BaseAgent(BaseModel):
     retry_count: int = Field(0, description="Retry count")
     max_retries: int = Field(20, description="Maximum retry attempts")
     silent: bool = Field(False, description="Whether to suppress console output")
+    error_verbosity: str = Field(
+        "normal", 
+        description="""Error verbosity level:
+        - 'minimal': Only show basic error notifications ('Error in tool_name')
+        - 'normal': Show clean error messages with exception details (default)
+        - 'verbose': Show full error messages with tracebacks"""
+    )
     
     class Config:
         arbitrary_types_allowed = True
@@ -974,7 +981,7 @@ class BaseAgent(BaseModel):
                     self._enqueue_single_agent_tool(tool)
                 except Exception as e:
                     logger.error(f"Failed to enqueue agent tool {tool_name}: {e}")
-                    self._handle_tool_error(
+                    self._handle_tool_error_sync(
                         f"Failed to create agent: {str(e)}",
                         tool,
                         e
@@ -1076,7 +1083,12 @@ class BaseAgent(BaseModel):
             logger.error(f"{error_msg}: {e}")
             await self._handle_tool_error(error_msg, tool, e)
             
+        except ToolExecutionError as e:
+            # Tool execution errors are already logged by the decorator
+            await self._handle_tool_error(str(e), tool, e)
+            
         except Exception as e:
+            # For unexpected errors, log with full traceback
             error_msg = f"Unexpected error in tool {tool_name}"
             logger.error(f"{error_msg}: {e}", exc_info=True)
             await self._handle_tool_error(error_msg, tool, e)
@@ -1278,7 +1290,7 @@ class BaseAgent(BaseModel):
         tool_name = tool["function"]["name"]
         tool_id = tool["id"]
         
-        # Create detailed error info
+        # Create error details
         error_details = {
             "error": error_message,
             "tool_name": tool_name,
@@ -1286,15 +1298,18 @@ class BaseAgent(BaseModel):
             "exception_message": str(exception)
         }
         
-        # Add traceback in debug mode
-        if logger.isEnabledFor(logging.DEBUG):
+        # Add traceback only in verbose mode
+        if self.error_verbosity == "verbose":
             error_details["traceback"] = traceback.format_exc()
         
-        # Log the error
-        logger.error(
-            f"Tool execution failed - {tool_name}: {error_message}",
-            exc_info=exception
-        )
+        # Print errors based on verbosity setting
+        if not self.silent:
+            if self.error_verbosity == "minimal":
+                print(f"Error in {tool_name}")
+            elif self.error_verbosity == "normal":
+                print(f"Tool error in {tool_name}: {str(exception)}")
+            else:  # verbose
+                print(f"Tool error in {tool_name}: {error_message}")
         
         # Add error message to conversation
         self._add_message(
@@ -1308,6 +1323,142 @@ class BaseAgent(BaseModel):
         
         # Update retry count
         self.retry_count += 1
+        
+        # Check for critical errors that should stop execution
+        is_critical_error = self._is_critical_tool_error(exception, tool_name)
+        
+        if is_critical_error:
+            # For critical errors, transition agent to waiting state to prevent infinite loops
+            if not self.silent:
+                print(f"Critical error in {tool_name}. Agent execution stopped.")
+            
+            # For conversational agents, wait for user input
+            if self.is_conversational:
+                self.state = AgentState.WAITING_FOR_USER
+            # For task agents, mark as complete if it's a creation error
+            elif isinstance(self, BaseTaskAgent):
+                self.state = AgentState.COMPLETE
+                # Remove from queue to stop execution
+                if self in self.agents_queue:
+                    self.agents_queue.remove(self)
+            else:
+                self.state = AgentState.WAITING_FOR_USER
+    
+    def _is_critical_tool_error(self, exception: Exception, tool_name: str) -> bool:
+        """
+        Determine if a tool error is critical enough to stop agent execution.
+        
+        Args:
+            exception: The exception that was raised
+            tool_name: Name of the tool that failed
+            
+        Returns:
+            True if this is a critical error that should stop execution
+        """
+        # Agent creation errors are always critical
+        if "Failed to create agent" in str(exception):
+            return True
+        
+        # BaseTaskAgent initialization errors (missing task_completed)
+        if isinstance(exception, TypeError) and "task_completed" in str(exception):
+            return True
+        
+        # ToolExecutionError from agent tools that failed during creation
+        if isinstance(exception, ToolExecutionError) and tool_name in self.tools_agent:
+            # Check if it's an agent creation failure
+            exception_msg = str(exception).lower()
+            if any(keyword in exception_msg for keyword in [
+                "failed to create agent",
+                "must implement 'task_completed'",
+                "initialization failed",
+                "agent initialization"
+            ]):
+                return True
+        
+        # Streaming mismatch errors
+        if "StreamingMismatchError" in str(type(exception)):
+            return True
+        
+        # Invalid tool schema errors
+        if isinstance(exception, (TypeError, ValueError)) and "schema" in str(exception).lower():
+            return True
+        
+        # If retry count is getting too high, consider it critical
+        if self.retry_count >= (self.max_retries // 2):  # Half of max retries
+            return True
+        
+        return False
+    
+    def _handle_tool_error_sync(
+        self,
+        error_message: str,
+        tool: Dict[str, Any],
+        exception: Exception
+    ) -> None:
+        """
+        Synchronous version of _handle_tool_error for use in non-async contexts.
+        
+        Args:
+            error_message: User-friendly error message
+            tool: Tool that failed
+            exception: The exception that was raised
+        """
+        tool_name = tool["function"]["name"]
+        tool_id = tool["id"]
+        
+        # Create error details
+        error_details = {
+            "error": error_message,
+            "tool_name": tool_name,
+            "exception_type": type(exception).__name__,
+            "exception_message": str(exception)
+        }
+        
+        # Add traceback only in verbose mode
+        if self.error_verbosity == "verbose":
+            error_details["traceback"] = traceback.format_exc()
+        
+        # Print errors based on verbosity setting
+        if not self.silent:
+            if self.error_verbosity == "minimal":
+                print(f"Error in {tool_name}")
+            elif self.error_verbosity == "normal":
+                print(f"Tool error in {tool_name}: {str(exception)}")
+            else:  # verbose
+                print(f"Tool error in {tool_name}: {error_message}")
+        
+        # Add error message to conversation
+        self._add_message(
+            role="tool",
+            content=json.dumps(error_details),
+            tool_call_id=tool_id
+        )
+        
+        # Remove failed tool from memory
+        self.tools_mem = [t for t in self.tools_mem if t["id"] != tool_id]
+        
+        # Update retry count
+        self.retry_count += 1
+        
+        # Check for critical errors that should stop execution
+        is_critical_error = self._is_critical_tool_error(exception, tool_name)
+        
+        if is_critical_error:
+            # For critical errors, transition agent to waiting state to prevent infinite loops
+            if not self.silent:
+                print(f"Critical error in {tool_name}. Agent execution stopped.")
+            
+            # For conversational agents, wait for user input
+            if self.is_conversational:
+                self.state = AgentState.WAITING_FOR_USER
+            # For task agents, mark as complete if it's a creation error
+            elif isinstance(self, BaseTaskAgent):
+                self.state = AgentState.COMPLETE
+                # Remove from queue to stop execution
+                if self in self.agents_queue:
+                    self.agents_queue.remove(self)
+            else:
+                self.state = AgentState.WAITING_FOR_USER
     
     def add_message(
         self,

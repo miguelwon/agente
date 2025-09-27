@@ -78,10 +78,12 @@ def function_tool(
                     
                     if not retry_on_error or retries > max_retries:
                         error_msg = f"Error in tool '{func.__name__}': {str(e)}"
-                        logger.error(error_msg, exc_info=True)
+                        # Log at DEBUG level to reduce noise - the base agent will handle user-facing messages
+                        logger.debug(error_msg, exc_info=True)
                         raise ToolExecutionError(error_msg) from e
                     
-                    logger.warning(
+                    # For retries, log at DEBUG level
+                    logger.debug(
                         f"Tool '{func.__name__}' failed (attempt {retries}/{max_retries}): {e}"
                     )
                     await asyncio.sleep(0.5 * retries)  # Exponential backoff

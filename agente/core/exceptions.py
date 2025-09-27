@@ -34,3 +34,4 @@ class ValidationError(AgenteError):
 class StreamingMismatchError(AgenteError):
     """Raised when parent and child agents have incompatible streaming settings."""
     pass
+
