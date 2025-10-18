@@ -1,4 +1,3 @@
-litellm
-pydantic
-langchain-core
-python-dotenv
+litellm>=1.70.0,<2.0.0
+pydantic>=2.8.0,<3.0.0
+langchain-core>=1.0.0,<2.0.0
