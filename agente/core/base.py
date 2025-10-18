@@ -220,7 +220,7 @@ class BaseAgent(BaseModel):
     )
     # Logging
     log_calls: List[Any] = Field(default_factory=list, description="Log of API calls made")
-    logs_completions: List[Any] = Field(default_factory=list, description="Log of API responses")
+    log_completions: List[Any] = Field(default_factory=list, description="Log of API responses")
     
     # Response tracking
     responses: List[Response] = Field(default_factory=list, description="Non-streaming responses")
@@ -596,7 +596,7 @@ def calculate_circle_area(self, radius: float) -> float:
             
             # Make the API call
             api_response = await acompletion(**completion_params)
-            self.logs_completions.append(api_response)
+            self.log_completions.append(api_response)
             
             # Process the response
             response = self._process_api_response(api_response)
@@ -639,7 +639,7 @@ def calculate_circle_area(self, radius: float) -> float:
             
             # Process stream chunks
             async for chunk in await acompletion(**completion_params):
-                self.logs_completions.append(chunk)
+                self.log_completions.append(chunk)
                 
                 # Process chunk and yield response
                 stream_response = self._process_stream_chunk(chunk, stream_state)
