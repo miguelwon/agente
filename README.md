@@ -20,18 +20,19 @@ Multi-agent orchestration is supported in an hierarchical way, starting from a m
 
 ## Installation
 
-Instal the required dependencies:
-
-```bash
-pip install -r requirements.txt
-```
-
 Install the package:
 
 ```bash
 pip install agente
 ```
 
+For running the examples with Gradio UI:
+
+```bash
+pip install agente[examples]
+```
+
+**Note:** The frameworks works on top of litellm, so you need to set your provider API key in the environment variables.
 
 
 ## Quick Start
@@ -39,17 +40,17 @@ pip install agente
 Here's a simple example of creating a conversational agent:
 
 ```python
+import os 
+os.environ["OPENAI_API_KEY"] = "your_api_key" #load your provider API key
 from agente.core.base import BaseAgent
-from dotenv import load_dotenv
 
-# Load environment variables (requires OpenAI API key)
-load_dotenv()
 
 class SimpleAgent(BaseAgent):
     agent_name: str = "SimpleAgent"
     system_prompt: str = "You are a helpful AI assistant."
+    silent: bool = True #while running the agent, it will not print execution logs
     completion_kwargs: dict = {
-        "model": "gpt-4",
+        "model": "gpt-4.1-mini",
         "stream": False,
         "temperature": 1.0,
         "max_tokens": 500,
@@ -64,42 +65,69 @@ agent.add_message(role = "user", content =  "Tell me a joke about programming.")
 # Run the agent and get responses
 responses = await agent.run()
 
-# Print the last response
-print(responses[-1].content)
+# by default the response have litellm format
+print(responses[0].choices[0].message.content)
 ```
+
+### Using agente response format
+
+```python
+# Add a message
+agent.add_message(role = "user", content =  "Another one, please.")
+
+# Now with agente response format
+responses = await agent.run(output_format = "agente")
+
+print(responses[0].content)
+```
+
+
+### To access the conversation history
+```python
+
+conversation_history = agent.conv_history
+
+print(conversation_history.model_dump())
+```
+
+### To access the logs
+```python
+# Get the logs
+logs = agent.log_calls
+print(logs)
+
+logs = agent.log_completions
+print(logs)
+```
+
+
 
 ## Advanced Usage
 
 ### Adding Tools
 
-Agents can be enhanced with tools using the `@function_tool` decorator:
+Agents can be enhanced with tools using the `@function_tool` decorator. The decorator will automatically generate a tool schema for the function based on the docstring and the `Annotated` type hints.
 
 ```python
+import os
+os.environ["OPENAI_API_KEY"] = "your_api_key" #load your provider API key
 from agente.core.base import BaseAgent
 from agente.core.decorators import function_tool
+from typing import Annotated
 
 class AddAgent(BaseAgent):
     agent_name: str = "add_agent"
-    
+
     @function_tool
-    async def calculate_sum(self, a: int, b: int) -> int:
-        """Calculate the sum of two numbers.
-        
-        Args:
-            a: The first number.
-            b: The second number.        
-        """
+    async def calculate_sum(self, a: Annotated[int,"The first number"], b: Annotated[int,"The second number"]) -> int:
+        """Calculate the sum of two numbers."""
         return a + b
 
 agent = AddAgent()
+agent.completion_kwargs['model'] = 'gpt-4.1-mini'
 agent.add_message(role = "user", content = "How much is 10 + 10?")
 responses = await agent.run()
-print(responses[-1].content)
-
-
-# Get the logs
-call_logs = agent.log_calls
-completions_logs = agent.logs_completions
+print(responses[-1].choices[0].message.content)
 ```
 
 ### Creating Multi-Agent Systems
@@ -109,11 +137,11 @@ You can create complex multi-agent systems where agents can call other agents us
 For now the framework was designed to work with a hierarchical structure, where a main agent can call other specialized agents that can call other agents and so on. These sub-agents must be `TaskAgents` that inherit from `BaseTaskAgent` and must have a `complete_task` method that returns the result of the task.
 
 ```python
+import os
+os.environ["OPENAI_API_KEY"] = "your_api_key" #load your provider API key
 from agente.core.base import BaseAgent,BaseTaskAgent
 from agente.core.decorators import function_tool,agent_tool
 import random
-from dotenv import load_dotenv
-load_dotenv()
 
 class JokeTeller(BaseTaskAgent):
     agent_name: str = "JokeTeller"
@@ -124,12 +152,8 @@ class JokeTeller(BaseTaskAgent):
     }
 
     @function_tool
-    def complete_task(self,joke:str):
-        """To be used as a tool to complete the task.
-
-        Args:
-            joke: The joke to return.
-        """
+    def task_completed(self,joke:Annotated[str,"The joke to return"]):
+        """To be used as a tool to complete the task."""
         return joke
 
 
@@ -148,13 +172,8 @@ class MainAgent(BaseAgent):
 
 
     @agent_tool()
-    def get_joke(self,joke_topic:str):
-        """Tool to get a joke.
-
-        Args:
-            joke_topic: The topic of the joke.
-        """
-
+    def get_joke(self,joke_topic:Annotated[str,"The topic of the joke"]):
+        """Tool to get a joke."""
         joke_agent = JokeTeller()
         joke_agent.add_message(role = "user", content = "Tell me a joke about " + joke_topic)
         return joke_agent
@@ -162,7 +181,7 @@ class MainAgent(BaseAgent):
 example_agent = MainAgent()
 example_agent.add_message(role = "user", content = "Call the tool random_topic to get a random topic and then tell  me a joke about it")
 responses = await example_agent.run()
-print(responses[-1].content)
+print(responses[-1].choices[0].message.content)
 ```
 
 ## Examples
