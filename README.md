@@ -134,7 +134,7 @@ print(responses[-1].choices[0].message.content)
 
 You can create complex multi-agent systems where agents can call other agents using the `@agent_tool` decorator. 
 
-For now the framework was designed to work with a hierarchical structure, where a main agent can call other specialized agents that can call other agents and so on. These sub-agents must be `TaskAgents` that inherit from `BaseTaskAgent` and must have a `complete_task` method that returns the result of the task.
+For now the framework was designed to work with a hierarchical structure, where a main agent can call other specialized agents that can call other agents and so on. These sub-agents must be `TaskAgents` that inherit from `BaseTaskAgent` and must have a `task_completed` method that returns the result of the task.
 
 ```python
 import os
