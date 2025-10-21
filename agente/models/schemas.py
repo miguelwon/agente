@@ -8,6 +8,8 @@ from enum import Enum
 class ContentType(str, Enum):
     """Enumeration of content types."""
     TEXT = "text"
+    IMAGE = "image"
+    IMAGE_URL = "image_url"
     THINKING = "thinking"
     REDACTED_THINKING = "redacted_thinking"
 
@@ -49,6 +51,46 @@ class Content(BaseModel):
     text: str = Field(..., description="Text content")
 
 
+class ImageSource(BaseModel):
+    """Image source information."""
+    type: Literal["url", "base64"] = Field(..., description="Source type")
+    url: Optional[str] = Field(None, description="Image URL")
+    data: Optional[str] = Field(None, description="Base64-encoded image data")
+    media_type: Optional[str] = Field(None, description="Media type (e.g., image/png, image/jpeg)")
+    
+    @validator('data')
+    def validate_base64_source(cls, v, values):
+        """Ensure base64 type has data."""
+        if values.get('type') == 'base64' and not v:
+            raise ValueError("Base64 source type requires 'data' field")
+        return v
+    
+    @validator('url')
+    def validate_url_source(cls, v, values):
+        """Ensure url type has url."""
+        if values.get('type') == 'url' and not v:
+            raise ValueError("URL source type requires 'url' field")
+        return v
+
+
+class ContentImage(BaseModel):
+    """Image content."""
+    type: Literal["image"] = Field("image", description="Content type")
+    source: ImageSource = Field(..., description="Image source")
+
+
+class ImageUrl(BaseModel):
+    """Image URL information (OpenAI format)."""
+    url: str = Field(..., description="Image URL or data URI (data:image/jpeg;base64,...)")
+    detail: Optional[str] = Field(None, description="Detail level for vision models (low/high/auto)")
+
+
+class ContentImageUrl(BaseModel):
+    """Image content in OpenAI format."""
+    type: Literal["image_url"] = Field("image_url", description="Content type")
+    image_url: ImageUrl = Field(..., description="Image URL information")
+
+
 class ContentThinking(BaseModel):
     """Thinking content with optional signature."""
     type: Literal["thinking"] = Field("thinking", description="Content type")
@@ -63,7 +105,7 @@ class ContentRedactedThinking(BaseModel):
 
 
 # Union type for all content types
-ContentUnion = Union[Content, ContentThinking, ContentRedactedThinking]
+ContentUnion = Union[Content, ContentImage, ContentImageUrl, ContentThinking, ContentRedactedThinking]
 
 
 class ToolCall(BaseModel):
@@ -122,7 +164,26 @@ class Message(BaseModel):
             if len(self.content) == 1 and self.content[0].type == "text":
                 result["content"] = self.content[0].text
             else:
-                result["content"] = [c.model_dump() for c in self.content]
+                # Handle multimodal content (text + images)
+                formatted_content = []
+                for c in self.content:
+                    if c.type == "image":
+                        # Format image content for API compatibility
+                        image_data = {"type": "image_url"}
+                        if c.source.type == "url":
+                            image_data["image_url"] = {"url": c.source.url}
+                        else:  # base64
+                            media_type = c.source.media_type or "image/jpeg"
+                            image_data["image_url"] = {
+                                "url": f"data:{media_type};base64,{c.source.data}"
+                            }
+                        formatted_content.append(image_data)
+                    elif c.type == "image_url":
+                        # Already in OpenAI format, pass through
+                        formatted_content.append(c.model_dump())
+                    else:
+                        formatted_content.append(c.model_dump())
+                result["content"] = formatted_content
         
         if self.tool_calls:
             result["tool_calls"] = self.tool_calls
