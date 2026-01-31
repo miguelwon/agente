@@ -254,6 +254,7 @@ class BaseAgent(BaseModel):
         default_factory=dict, description="Parameters for LLM completion calls"
     )
     can_add_tools: bool = Field(False, description="Whether dynamic tool addition is allowed")
+    defer_tool_loading: bool = Field(False, description="Whether to add defer_loading=True to each tool schema")
     max_calls_safeguard: int = Field(30, description="Maximum number of calls to prevent infinite loops")
     retry_count: int = Field(0, description="Retry count")
     max_retries: int = Field(20, description="Maximum retry attempts")
@@ -570,11 +571,16 @@ def calculate_circle_area(self, radius: float) -> float:
         if self.tools_schema:
             params["tools"] = self.tools_schema
             
-            # Validate tools
+            # Validate tools and apply defer_loading if enabled
             for tool in params["tools"]:
+                if "function" not in tool:
+                    continue  # Skip non-function tools (e.g., tool_search)
                 tool_name = tool["function"]["name"]
                 if tool_name not in self.tools_functions and tool_name not in self.tools_agent:
                     raise InvalidToolError(f"Tool '{tool_name}' not found in registry")
+                # Add defer_loading if enabled
+                if self.defer_tool_loading:
+                    tool["defer_loading"] = True
         
         return params
 
@@ -670,8 +676,10 @@ def calculate_circle_area(self, radius: float) -> float:
         Args:
             response: The processed response
         """
-        # If we have tool calls, we remain READY (tools will be executed)
-        if response.tool_calls:
+        # If we have tool calls in memory to execute, we remain READY
+        # Note: we check tools_mem, not response.tool_calls, because server-side
+        # tool calls (e.g., tool_search) are filtered out during processing
+        if self.tools_mem:
             self.state = AgentState.READY
             return
 
@@ -700,8 +708,10 @@ def calculate_circle_area(self, radius: float) -> float:
         Args:
             stream_state: The final streaming state
         """
-        # If we have tool calls, we remain READY
-        if stream_state.tool_calls_info:
+        # If we have tool calls in memory to execute, we remain READY
+        # Note: we check tools_mem, not stream_state.tool_calls_info, because
+        # server-side tool calls (e.g., tool_search) are filtered out during processing
+        if self.tools_mem:
             self.state = AgentState.READY
             return
 
@@ -1041,11 +1051,22 @@ def calculate_circle_area(self, radius: float) -> float:
         for tool_call in tool_calls:
             tool_dict = tool_call if isinstance(tool_call, dict) else tool_call.model_dump()
             
+            # Skip server-side tool calls (e.g., tool_search)
+            # These are handled by the API server, not the agent
+            tool_id = tool_dict.get("id", "")
+            if tool_id.startswith("srvtoolu_"):
+                logger.debug(f"Skipping server-side tool call: {tool_dict['function']['name']}")
+                continue
+            
             # Check for task_completed
             if tool_dict["function"]["name"] == "task_completed":
                 self._mark_task_complete = True
             
             self.tools_mem.append(tool_dict)
+        
+        # If no tools to process after filtering, return early
+        if not self.tools_mem:
+            return
         
         # Add to conversation history
         self._add_message(role="assistant", tool_calls=self.tools_mem)
