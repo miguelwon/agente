@@ -18,7 +18,8 @@ def function_tool(
     next_tool: Optional[str] = None,
     manual_call: Optional[Callable[[Any], Dict]] = None,
     retry_on_error: bool = False,
-    max_retries: int = 3
+    max_retries: int = 3,
+    defer_loading: bool = False
 ) -> Callable:
     """
     Decorator to mark a method as a function tool.
@@ -33,6 +34,7 @@ def function_tool(
         manual_call: Function to transform the output before passing to next_tool
         retry_on_error: Whether to retry on error
         max_retries: Maximum number of retry attempts
+        defer_loading: Whether to add defer_loading=True to the tool schema
         
     Returns:
         Decorated function with tool metadata
@@ -100,6 +102,7 @@ def function_tool(
         async_wrapper.manual_call = manual_call
         async_wrapper.retry_on_error = retry_on_error
         async_wrapper.max_retries = max_retries
+        async_wrapper.defer_loading = defer_loading
         
         # Preserve original function for inspection
         async_wrapper.__wrapped__ = func

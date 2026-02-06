@@ -135,7 +135,10 @@ class ToolRegistry:
                 if callable(method) and getattr(method, "is_tool", False):
                     tools.append(method)
                     schema = self._create_tool_schema(method)
-                    schemas.append({"type": "function", "function": schema})
+                    tool_entry = {"type": "function", "function": schema}
+                    if getattr(method, "defer_loading", False):
+                        tool_entry["defer_loading"] = True
+                    schemas.append(tool_entry)
                     seen_names.add(name)
 
         self.tools = tools
@@ -254,7 +257,6 @@ class BaseAgent(BaseModel):
         default_factory=dict, description="Parameters for LLM completion calls"
     )
     can_add_tools: bool = Field(False, description="Whether dynamic tool addition is allowed")
-    defer_tool_loading: bool = Field(False, description="Whether to add defer_loading=True to each tool schema")
     max_calls_safeguard: int = Field(30, description="Maximum number of calls to prevent infinite loops")
     retry_count: int = Field(0, description="Retry count")
     max_retries: int = Field(20, description="Maximum retry attempts")
@@ -571,16 +573,13 @@ def calculate_circle_area(self, radius: float) -> float:
         if self.tools_schema:
             params["tools"] = self.tools_schema
             
-            # Validate tools and apply defer_loading if enabled
+            # Validate tools
             for tool in params["tools"]:
                 if "function" not in tool:
                     continue  # Skip non-function tools (e.g., tool_search)
                 tool_name = tool["function"]["name"]
                 if tool_name not in self.tools_functions and tool_name not in self.tools_agent:
                     raise InvalidToolError(f"Tool '{tool_name}' not found in registry")
-                # Add defer_loading if enabled
-                if self.defer_tool_loading:
-                    tool["defer_loading"] = True
         
         return params
 
@@ -676,10 +675,15 @@ def calculate_circle_area(self, radius: float) -> float:
         Args:
             response: The processed response
         """
-        # If we have tool calls in memory to execute, we remain READY
-        # Note: we check tools_mem, not response.tool_calls, because server-side
-        # tool calls (e.g., tool_search) are filtered out during processing
-        if self.tools_mem:
+        # If there were non-server-side tool calls, remain READY so the loop
+        # continues and the LLM can process the tool results.
+        # Note: we can't check tools_mem here because tools have already been
+        # executed and removed from it by _handle_response_content.
+        has_local_tool_calls = any(
+            not (tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")).startswith("srvtoolu_")
+            for tc in (response.tool_calls or [])
+        )
+        if has_local_tool_calls:
             self.state = AgentState.READY
             return
 
@@ -693,11 +697,6 @@ def calculate_circle_area(self, radius: float) -> float:
             self.state = AgentState.WAITING_FOR_USER
             return
 
-        # For task agents that haven't completed their task
-        if isinstance(self, BaseTaskAgent) and not self.completed_task:
-            self.state = AgentState.WAITING_FOR_USER
-            return        
-
         # Default: wait for user
         self.state = AgentState.WAITING_FOR_USER
 
@@ -708,10 +707,13 @@ def calculate_circle_area(self, radius: float) -> float:
         Args:
             stream_state: The final streaming state
         """
-        # If we have tool calls in memory to execute, we remain READY
-        # Note: we check tools_mem, not stream_state.tool_calls_info, because
-        # server-side tool calls (e.g., tool_search) are filtered out during processing
-        if self.tools_mem:
+        # If there were non-server-side tool calls, remain READY so the loop
+        # continues and the LLM can process the tool results.
+        has_local_tool_calls = any(
+            not tool_id.startswith("srvtoolu_")
+            for tool_id in stream_state.tool_calls_info
+        )
+        if has_local_tool_calls:
             self.state = AgentState.READY
             return
 
