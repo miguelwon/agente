@@ -49,6 +49,13 @@ jobs:
           # Strip 'v' from the tag to get the version number (e.g., '0.1.3')
           echo "VERSION=${TAG#v}" >> $GITHUB_OUTPUT
 
+      - name: Get previous tag
+        id: get_previous_tag
+        run: |
+          CURRENT_TAG=${{ github.event_name == 'release' && github.ref_name || github.event.inputs.tag }}
+          PREVIOUS_TAG=$(git tag --sort=-v:refname | grep -v "^${CURRENT_TAG}$" | head -n 1)
+          echo "PREVIOUS_TAG=${PREVIOUS_TAG}" >> $GITHUB_OUTPUT
+
       - name: Get tag annotation
         id: get_tag_message
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
@@ -94,7 +101,7 @@ jobs:
             
             ### 🔗 Links
             - [PyPI Package](https://pypi.org/project/agente/${{ steps.get_version.outputs.VERSION }}/)
-            - [Full Changelog](https://github.com/miguelwon/agente/compare/v0.3.2...${{ github.ref_name }})
+            - [Full Changelog](https://github.com/miguelwon/agente/compare/${{ steps.get_previous_tag.outputs.PREVIOUS_TAG }}...${{ github.ref_name }})
           draft: false
           prerelease: false
           generate_release_notes: true
