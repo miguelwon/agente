@@ -94,7 +94,7 @@ jobs:
             
             ### 🔗 Links
             - [PyPI Package](https://pypi.org/project/agente/${{ steps.get_version.outputs.VERSION }}/)
-            - [Full Changelog](https://github.com/miguelwon/agente/compare/v0.2.2...${{ github.ref_name }})
+            - [Full Changelog](https://github.com/miguelwon/agente/compare/v0.3.2...${{ github.ref_name }})
           draft: false
           prerelease: false
           generate_release_notes: true
